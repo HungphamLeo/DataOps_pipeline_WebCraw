@@ -27,11 +27,8 @@ from typing import Any, Dict, List, Optional
 from flows.cophieu68_deploy_full_pipeline.context import (
     ExecutionContext,
     LAKEHOUSE_BASE,
-    S3_ENDPOINT,
-    S3_KEY,
-    S3_SECRET,
 )
-from flows.cophieu68_deploy_full_pipeline.builders import build_pg_writer
+from flows.cophieu68_deploy_full_pipeline.builders import build_pg_writer, build_duckdb_engine
 
 
 class ServingProcessor:
@@ -50,19 +47,15 @@ class ServingProcessor:
     def __init__(
         self,
         pg_writer,                 # PostgreSQLWriter từ platforms
-        minio_endpoint: str,       # HOST:PORT
-        minio_access_key: str,
-        minio_secret_key: str,
+        duck_engine,               # DuckDBEngine từ platforms (đã cấu hình S3)
         lakehouse_base: str = LAKEHOUSE_BASE,
         logger=None,
     ) -> None:
         import logging
-        self.pg       = pg_writer
-        self.endpoint = minio_endpoint
-        self.ak       = minio_access_key
-        self.sk       = minio_secret_key
-        self.base     = lakehouse_base.rstrip("/")
-        self.logger   = logger or logging.getLogger(__name__)
+        self.pg     = pg_writer
+        self.duck   = duck_engine
+        self.base   = lakehouse_base.rstrip("/")
+        self.logger = logger or logging.getLogger(__name__)
 
     # ------------------------------------------------------------------
     # Internal: đọc Parquet từ MinIO qua DuckDB httpfs
@@ -70,26 +63,23 @@ class ServingProcessor:
 
     def _read_silver(self, silver_table: str) -> Optional[List[Dict[str, Any]]]:
         """Đọc silver/<table>/**/*.parquet qua DuckDB, trả về list of dicts (all str)."""
-        import duckdb
+        import polars as pl
 
-        glob = f"{self.base}/silver/{silver_table}/**/*.parquet"
+        glob_path = f"{self.base}/silver/{silver_table}/**/*.parquet"
         try:
-            con = duckdb.connect(":memory:")
-            con.execute("INSTALL httpfs; LOAD httpfs;")
-            con.execute(f"SET s3_endpoint='{self.endpoint}';")
-            con.execute(f"SET s3_access_key_id='{self.ak}';")
-            con.execute(f"SET s3_secret_access_key='{self.sk}';")
-            con.execute("SET s3_use_ssl=false; SET s3_url_style='path'; SET s3_region='us-east-1';")
-            df = con.execute(
-                f"SELECT * FROM read_parquet('{glob}', hive_partitioning=true)"
-            ).fetchdf()
-            con.close()
-            if df.empty:
+            df_lazy = self.duck.query_to_polars(
+                f"SELECT * FROM read_parquet('{glob_path}', hive_partitioning=true)"
+            )
+            df = df_lazy.collect()
+            if df.is_empty():
                 return None
             # Cast tất cả sang str để match staging TEXT schema
-            for col in df.columns:
-                df[col] = df[col].astype(str).where(df[col].notna(), None)
-            return df.to_dict("records")
+            str_exprs = [
+                pl.col(c).cast(pl.Utf8, strict=False).alias(c)
+                for c in df.columns
+            ]
+            df = df.with_columns(str_exprs)
+            return df.to_pandas().where(lambda x: x.notna(), None).to_dict("records")
         except Exception as exc:
             self.logger.warning("[Serving] Read silver/%s failed: %s", silver_table, exc)
             return None
@@ -157,8 +147,9 @@ class ServingProcessor:
         if not records:
             return {"rows_in": 0, "rows_out": 0, "table": "dim_company"}
         rows_in = self._load_staging("company_profile", records, run_id)
-        sql = f"""
-        INSERT INTO {self._norm("dim_company")}
+        sql = (
+            f"INSERT INTO {self._norm('dim_company')}"
+            r"""
             (company_key, symbol, full_name, english_name, short_name,
              address, phone_number, fax, website, email_address,
              established_date, listed_date, listed_volume_initial,
@@ -172,9 +163,9 @@ class ServingProcessor:
             NULLIF(short_name,'None'),    NULLIF(address,'None'),
             NULLIF(phone_number,'None'),  NULLIF(fax,'None'),
             NULLIF(website,'None'),       NULLIF(email_address,'None'),
-            CASE WHEN established_date ~ '^\d{{4}}-\d{{2}}-\d{{2}}$'
+            CASE WHEN established_date ~ '^\d{4}-\d{2}-\d{2}$'
                  THEN established_date::DATE ELSE NULL END,
-            CASE WHEN listed_date ~ '^\d{{4}}-\d{{2}}-\d{{2}}$'
+            CASE WHEN listed_date ~ '^\d{4}-\d{2}-\d{2}$'
                  THEN listed_date::DATE ELSE NULL END,
             NULLIF(listed_volume_initial,'None')::BIGINT,
             NULLIF(listed_volume,'None')::BIGINT,
@@ -182,13 +173,14 @@ class ServingProcessor:
             NULLIF(market_capitalization,'None')::NUMERIC(20,2),
             NULLIF(foreign_buy,'None'), NULLIF(foreign_ownership,'None'),
             COALESCE(
-                CASE WHEN effective_date ~ '^\d{{4}}-\d{{2}}-\d{{2}}$'
+                CASE WHEN effective_date ~ '^\d{4}-\d{2}-\d{2}$'
                      THEN effective_date::DATE END,
                 CURRENT_DATE),
             NULL::DATE, TRUE,
             NULLIF(_row_hash,'None'),
-            NOW(), %(run_id)s
-        FROM {self._stg("company_profile")}
+            NOW(), %(run_id)s"""
+            + f" FROM {self._stg('company_profile')}"
+            + r"""
         WHERE symbol IS NOT NULL AND symbol != 'None'
           AND company_key IS NOT NULL AND company_key != 'None'
         ORDER BY company_key, _ingest_timestamp DESC NULLS LAST
@@ -196,6 +188,7 @@ class ServingProcessor:
             full_name=EXCLUDED.full_name, market_capitalization=EXCLUDED.market_capitalization,
             _ingested_at=EXCLUDED._ingested_at, _pipeline_run_id=EXCLUDED._pipeline_run_id
         """
+        )
         self.pg.execute(sql, {"run_id": run_id})
         rows_out = self._count_run(self._norm("dim_company"), run_id)
         return {"rows_in": rows_in, "rows_out": rows_out, "table": "dim_company"}
@@ -295,20 +288,22 @@ class ServingProcessor:
         if not records:
             return {"rows_in": 0, "rows_out": 0, "table": "dim_industry"}
         rows_in = self._load_staging("industry_sectors", records, run_id)
-        sql = f"""
-        INSERT INTO {self._norm("dim_industry")}
+        sql = (
+            f"INSERT INTO {self._norm('dim_industry')}"
+            r"""
             (industry_sk, industry_code, industry_name,
              effective_date, end_date, is_current, _row_hash,
              _ingested_at, _pipeline_run_id)
         SELECT DISTINCT ON (industry_sk)
             industry_sk,
             NULLIF(industry_code,'None'), NULLIF(industry_name,'None'),
-            CASE WHEN effective_date ~ '^\d{{4}}-\d{{2}}-\d{{2}}$'
+            CASE WHEN effective_date ~ '^\d{4}-\d{2}-\d{2}$'
                  THEN effective_date::DATE ELSE CURRENT_DATE END,
             NULL::DATE, TRUE,
             NULLIF(_row_hash,'None'),
-            NOW(), %(run_id)s
-        FROM {self._stg("industry_sectors")}
+            NOW(), %(run_id)s"""
+            + f" FROM {self._stg('industry_sectors')}"
+            + r"""
         WHERE industry_code IS NOT NULL AND industry_code != 'None'
           AND industry_sk IS NOT NULL AND industry_sk != 'None'
         ORDER BY industry_sk, _ingest_timestamp DESC NULLS LAST
@@ -316,6 +311,7 @@ class ServingProcessor:
             industry_name=EXCLUDED.industry_name,
             _ingested_at=EXCLUDED._ingested_at, _pipeline_run_id=EXCLUDED._pipeline_run_id
         """
+        )
         self.pg.execute(sql, {"run_id": run_id})
         rows_out = self._count_run(self._norm("dim_industry"), run_id)
         return {"rows_in": rows_in, "rows_out": rows_out, "table": "dim_industry"}
@@ -402,7 +398,7 @@ class ServingExecutor:
         self.logger  = context.logger
 
     def execute(self) -> Dict[str, Any]:
-        from platforms.processing.base_processing_subsystem.subsystem5_and_30_error_event_schema_and_escalate import ErrorLevel
+        from platforms.processing.base_processing_subsystem import ErrorLevel
 
         self.logger.info(
             "[ServingExecutor] Starting serving phase date=%s", self.context.target_date
@@ -416,11 +412,10 @@ class ServingExecutor:
             )
             return {**result, "skipped": True, "reason": "missing_pg_credentials"}
 
+        duck = build_duckdb_engine(self.config)
         proc = ServingProcessor(
             pg_writer=pg,
-            minio_endpoint=S3_ENDPOINT,
-            minio_access_key=S3_KEY,
-            minio_secret_key=S3_SECRET,
+            duck_engine=duck,
             lakehouse_base=LAKEHOUSE_BASE,
             logger=self.logger,
         )
@@ -436,6 +431,7 @@ class ServingExecutor:
             result["errors"] += 1
         finally:
             pg.close()
+            duck.close()
 
         self.logger.info(
             "[ServingExecutor] Done tables_synced=%d errors=%d",

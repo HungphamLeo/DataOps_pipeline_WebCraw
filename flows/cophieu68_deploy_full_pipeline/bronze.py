@@ -17,9 +17,10 @@ from flows.cophieu68_deploy_full_pipeline.context import (
     make_batch_id,
 )
 from flows.cophieu68_deploy_full_pipeline.builders import (
-    _build_polars_engine,
-    _build_extractor,
-    _build_cleansing_rules,
+    build_polars_engine,
+    build_extractor,
+    build_cleansing_rules,
+    build_dq_ruleset,
 )
 
 
@@ -229,7 +230,7 @@ class BronzeExecutor:
 
     def _warn_dq(self, table: str, count: int) -> None:
         if count > 0:
-            from platforms.processing.base_processing_subsystem.subsystem5_and_30_error_event_schema_and_escalate import ErrorLevel
+            from platforms.processing.base_processing_subsystem import ErrorLevel
             self.context.error_log.add(
                 ErrorLevel.WARNING,
                 f"{count} DQ issues in bronze.{table}",
@@ -249,7 +250,7 @@ class BronzeExecutor:
             batch_id=batch_id,
             run_id=self.context.run_id,
             symbol=symbol,
-            cleansing=_build_cleansing_rules(symbol),
+            cleansing=build_cleansing_rules(symbol),
         )
         rows = res["stats"]["clean"]
         dq   = res["stats"].get("dq_violations", 0)
@@ -405,14 +406,14 @@ class BronzeExecutor:
             "errors": 0,
         }
 
-        polars_engine = _build_polars_engine(self.config)
+        polars_engine = build_polars_engine(self.config)
         governance_logger = logger_manager.get_logger("logger.governance.data_quality")
         ingester = BronzePolarsIngester(
             engine=polars_engine,
             base_path=LAKEHOUSE_BASE,
             governance_logger=governance_logger,
         )
-        extractor    = _build_extractor(self.config)
+        extractor    = build_extractor(self.config)
         global_batch = make_batch_id("GLOBAL")
 
         # ── Per-symbol ────────────────────────────────────────────────
@@ -435,7 +436,7 @@ class BronzeExecutor:
                 try:
                     fn()
                 except Exception as exc:
-                    from platforms.processing.base_processing_subsystem.subsystem5_and_30_error_event_schema_and_escalate import ErrorLevel
+                    from platforms.processing.base_processing_subsystem import ErrorLevel
                     self.logger.error("[Bronze] %s/%s failed: %s", symbol, step_name, exc)
                     self.context.error_log.add(ErrorLevel.WARNING, f"Bronze {symbol}/{step_name}: {exc}")
                     symbol_ok = False
@@ -450,7 +451,7 @@ class BronzeExecutor:
             for type_info in ("summary_info", "financial_info", "fund_info"):
                 self._ingest_industry_info(extractor, ingester, global_batch, result, type_info)
         except Exception as exc:
-            from platforms.processing.base_processing_subsystem.subsystem5_and_30_error_event_schema_and_escalate import ErrorLevel
+            from platforms.processing.base_processing_subsystem import ErrorLevel
             self.logger.error("[Bronze] Global crawlers failed: %s", exc)
             self.context.error_log.add(ErrorLevel.ERROR, f"Bronze global crawl failed: {exc}")
             result["errors"] += 1

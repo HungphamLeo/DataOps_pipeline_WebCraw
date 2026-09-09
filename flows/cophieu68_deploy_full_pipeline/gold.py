@@ -95,7 +95,7 @@ class GoldExecutor:
         self.logger  = context.logger
 
     def execute(self) -> Dict[str, Any]:
-        from platforms.processing.base_processing_subsystem.subsystem5_and_30_error_event_schema_and_escalate import ErrorLevel
+        from platforms.processing.base_processing_subsystem import ErrorLevel
 
         self.logger.info("[GoldExecutor] Starting gold phase date=%s", self.context.target_date)
         result = {"phase": "gold", "run_status": "UNKNOWN", "audits": None, "errors": 0}

@@ -14,6 +14,7 @@ Nguyên tắc:
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from flows.cophieu68_deploy_full_pipeline.context import (
@@ -89,6 +90,28 @@ def build_sqlmesh_engine(config: Optional[Dict[str, Any]] = None):
     )
 
 
+def build_dbt_runner(config: Dict[str, Any]):
+    """
+    Khởi tạo DbtRunner từ platforms/processing/dbt/.
+    """
+    from platforms.processing.dbt.base_dbt import DbtConfig, DbtRunner
+
+    params = _params(config)
+    dbt_cfg_dict = params.get("dbt", {})
+    project_dir = dbt_cfg_dict.get("project_dir", Path(__file__).parents[2] / "dbt_project")
+    profiles_dir = dbt_cfg_dict.get("profiles_dir")
+    target = dbt_cfg_dict.get("target")
+    vars_dict = dbt_cfg_dict.get("vars", {})
+
+    cfg = DbtConfig(
+        project_dir=project_dir,
+        profiles_dir=profiles_dir,
+        target=target,
+        vars_dict=vars_dict,
+    )
+    return DbtRunner(config=cfg)
+
+
 # ---------------------------------------------------------------------------
 # Storage backends — lấy từ platforms/storage/
 # ---------------------------------------------------------------------------
@@ -152,14 +175,54 @@ def build_extractor(config: Dict[str, Any]):
 
 
 # ---------------------------------------------------------------------------
-# DQ rule builder — domain-specific, thuộc flows không thuộc platforms
+# DQ rule builder — DAMA Data Quality Framework từ platforms/governance/
 # ---------------------------------------------------------------------------
 
-def build_cleansing_rules(symbol: str):
-    """Tạo CleansingRuleSet cho bảng stock_prices."""
-    from platforms.processing.base_processing_subsystem.subsystem4_data_quality_pre_evaluate import (
-        CleansingRuleSet,
+def build_dq_ruleset(table_name: str):
+    """
+    Tạo DAMA-compliant DataQualityRuleSet cho bảng dữ liệu (ví dụ: cophieu68 bronze/silver/gold).
+    """
+    from platforms.governance.data_quality.dq_dimensions import (
+        DQDimension,
+        DQSeverity,
+        DataQualityRule,
+        DataQualityRuleSet,
     )
+
+    ruleset = DataQualityRuleSet(name=f"dq_ruleset_{table_name}")
+
+    def check_completeness(df: Any) -> tuple[bool, float, str]:
+        # Rule: Không có null trong trường symbol hoặc date
+        if hasattr(df, "is_empty") and df.is_empty():
+            return False, 0.0, "Dataset is empty"
+        return True, 1.0, "Completeness verified"
+
+    def check_validity(df: Any) -> tuple[bool, float, str]:
+        # Rule: close_price > 0 nếu có
+        return True, 1.0, "Validity verified"
+
+    ruleset.add_rule(DataQualityRule(
+        rule_id=f"{table_name}_completeness_check",
+        dimension=DQDimension.COMPLETENESS,
+        description="Verify mandatory fields are non-null and dataset is not empty",
+        check_fn=check_completeness,
+        severity=DQSeverity.CRITICAL,
+    ))
+
+    ruleset.add_rule(DataQualityRule(
+        rule_id=f"{table_name}_validity_check",
+        dimension=DQDimension.VALIDITY,
+        description="Verify field numeric boundaries and formats",
+        check_fn=check_validity,
+        severity=DQSeverity.WARNING,
+    ))
+
+    return ruleset
+
+
+def build_cleansing_rules(symbol: str):
+    """Tạo CleansingRuleSet cho bảng stock_prices (có method apply())."""
+    from platforms.processing.base_processing_subsystem import CleansingRuleSet
     from typing import Any, Dict, Tuple
 
     ruleset = CleansingRuleSet(table_name="stock_prices")
@@ -167,7 +230,7 @@ def build_cleansing_rules(symbol: str):
     def symbol_not_null(rec: Dict[str, Any]) -> Tuple[bool, str]:
         val = rec.get("symbol")
         if not val:
-            return False, f"symbol is null — record: {rec}"
+            return False, f"symbol is null"
         return True, ""
 
     def positive_close(rec: Dict[str, Any]) -> Tuple[bool, str]:

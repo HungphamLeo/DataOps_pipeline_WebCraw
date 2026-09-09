@@ -1,154 +1,123 @@
 #!/usr/bin/env python3
 """
-cli/main.py — Command Line Entry Point
-========================================
-Trách nhiệm duy nhất: parse CLI args → gọi MasterPipelineOrchestrator.
-
-Không chứa:
-  - Business logic
-  - Config loading
-  - Database / storage connections
-
-Cách dùng:
-  python cli/main.py cophieu68 full   --symbols FPT VNM --date 2026-09-09
-  python cli/main.py cophieu68 bronze --symbols FPT VNM
-  python cli/main.py cophieu68 silver --date 2026-09-09
-  python cli/main.py cophieu68 gold   --env prod
-  python cli/main.py cophieu68 serving
-  python cli/main.py cophieu68 validate
-  python cli/main.py cophieu68 full --dry-run
-
-Thêm pipeline mới:
-  python cli/main.py <new_pipeline> full --config path/to/config.yaml
+Module: cli.main
+Layer: Application CLI Entry Point
+Responsibility: Ultra-thin CLI entry point. Parses command line arguments, lazily resolves
+                and loads pipeline orchestrators from registry, and triggers execution.
+Does NOT contain: Business logic, direct configuration file loading, database or storage drivers.
 """
+
 from __future__ import annotations
 
 import argparse
-import sys
+import importlib
 from pathlib import Path
+import sys
+from typing import Any, Dict, Tuple
 
-# Đảm bảo project root nằm trong sys.path để import hoạt động
+# Ensure project root is available in sys.path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_PROJECT_ROOT))
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 
-# ---------------------------------------------------------------------------
-# Registry: tên pipeline → module orchestrator
-# ---------------------------------------------------------------------------
-
-PIPELINE_REGISTRY = {
+PIPELINE_REGISTRY: Dict[str, str] = {
     "cophieu68": "flows.cophieu68_deploy_full_pipeline.run",
 }
 
 
-def _load_orchestrator(pipeline: str, config_path: str):
+def _load_orchestrator(pipeline: str, config_path: str | None) -> Tuple[Any, Any]:
     """
-    Lazy import orchestrator cho pipeline được chỉ định.
-    Thêm pipeline mới: đăng ký vào PIPELINE_REGISTRY, không sửa file này.
+    Lazy dynamic loader for registered pipeline orchestrators.
     """
     if pipeline not in PIPELINE_REGISTRY:
-        print(f"[CLI] Unknown pipeline: '{pipeline}'")
-        print(f"      Available: {', '.join(PIPELINE_REGISTRY.keys())}")
+        sys.stderr.write(f"[CLI Error] Unknown pipeline: '{pipeline}'. Registered pipelines: {', '.join(PIPELINE_REGISTRY.keys())}\n")
         sys.exit(1)
 
     module_path = PIPELINE_REGISTRY[pipeline]
-    import importlib
     module = importlib.import_module(module_path)
-    return module.MasterPipelineOrchestrator(config_path=config_path), module.format_result
+    orchestrator = module.MasterPipelineOrchestrator(config_path=config_path)
+    return orchestrator, module.format_result
 
-
-# ---------------------------------------------------------------------------
-# Argument parser
-# ---------------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
+    """
+    Build command line argument parser with pipeline routing and execution parameters.
+    """
     parser = argparse.ArgumentParser(
         prog="cli/main.py",
-        description="DataOps Pipeline CLI — chạy ETL pipeline theo từng phase",
+        description="DataOps Pipeline CLI — Multi-tier Data Platform Execution Engine",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Ví dụ:
-  python cli/main.py cophieu68 full    --symbols FPT VNM HPG
-  python cli/main.py cophieu68 bronze  --symbols FPT --date 2026-09-09
-  python cli/main.py cophieu68 silver  --date 2026-09-09
-  python cli/main.py cophieu68 gold    --env prod
-  python cli/main.py cophieu68 serving
-  python cli/main.py cophieu68 validate --dry-run
-        """,
     )
 
     parser.add_argument(
         "pipeline",
         choices=list(PIPELINE_REGISTRY.keys()),
-        help="Tên pipeline cần chạy",
+        help="Target pipeline name",
     )
     parser.add_argument(
         "phase",
         choices=["bronze", "silver", "gold", "serving", "full", "validate"],
-        help="Phase cần thực thi",
+        help="Execution phase target",
     )
     parser.add_argument(
         "--symbols", "-s",
         nargs="+",
         default=None,
         metavar="SYMBOL",
-        help="Danh sách mã cổ phiếu (vd: FPT VNM HPG). Mặc định: FPT VNM HPG MBB SSI",
+        help="List of stock symbols (e.g. FPT VNM HPG)",
     )
     parser.add_argument(
         "--date", "-d",
         default=None,
         metavar="YYYY-MM-DD",
-        help="Ngày xử lý (mặc định: hôm nay)",
+        help="Execution date (defaults to current date)",
     )
     parser.add_argument(
         "--env", "-e",
         default="prod",
         choices=["prod", "dev", "staging"],
-        help="Environment cho SQLMesh models (mặc định: prod)",
+        help="Target environment (default: prod)",
     )
     parser.add_argument(
         "--backend", "-b",
         default="polars",
         choices=["polars", "spark", "duckdb", "sqlmesh", "dbt"],
-        help="Processing backend (mặc định: polars)",
+        help="Processing engine backend (default: polars)",
     )
     parser.add_argument(
         "--config", "-c",
         default=None,
         metavar="PATH",
-        help="Đường dẫn tới config YAML (mặc định: platforms/orchestration/prefect/config/cophieu68_config.yaml)",
+        help="Path to YAML project config file",
     )
     parser.add_argument(
         "--output", "-o",
         default="summary",
         choices=["summary", "text", "json"],
-        help="Định dạng output (mặc định: summary)",
+        help="Output format (default: summary)",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Validate config, không thực thi pipeline",
+        help="Perform dry run validation without mutating storage",
     )
 
     return parser
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
 def main() -> None:
+    """
+    Thin entry point: parses CLI arguments and runs selected orchestrator.
+    Orchestrator is responsible for resolving ExecutionPhase — CLI passes raw string.
+    """
     parser = build_parser()
-    args   = parser.parse_args()
+    args = parser.parse_args()
 
-    # Load orchestrator cho pipeline được chọn
     orchestrator, fmt_fn = _load_orchestrator(args.pipeline, args.config)
 
-    from flows.cophieu68_deploy_full_pipeline.context import ExecutionPhase
-
-    # Chạy pipeline
     result = orchestrator.run(
-        phase=ExecutionPhase(args.phase),
+        phase=args.phase,           # raw string — orchestrator resolves to ExecutionPhase
         symbols=args.symbols,
         backend=args.backend,
         target_date=args.date,
@@ -156,10 +125,8 @@ def main() -> None:
         dry_run=args.dry_run,
     )
 
-    # In kết quả
-    print(fmt_fn(result, args.output))
+    sys.stdout.write(f"{fmt_fn(result, args.output)}\n")
 
-    # Exit code: 1 nếu thất bại
     terminal_statuses = ("SUCCESS", "COMPLETED", "VALIDATION_PASSED", "SKIPPED")
     if result.get("status") not in terminal_statuses:
         sys.exit(1)

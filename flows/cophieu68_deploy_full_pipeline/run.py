@@ -91,25 +91,24 @@ class MasterPipelineOrchestrator:
         logger_manager.configure_from_project_config(str(self.config_mgr.config_path))
 
         # Lazy import để tránh circular import
-        from platforms.processing.base_processing_subsystem.subsystem34_metadata_repo import MetadataRepository
+        from platforms.processing.base_processing_subsystem import MetadataRepository
         self.metadata_repo = MetadataRepository(
             delta_backend=None, logger=self.logger, in_memory=True
         )
 
     def run(
         self,
-        phase: ExecutionPhase,
+        phase: "str | ExecutionPhase",  # accepts raw string from CLI or ExecutionPhase enum
         symbols: Optional[List[str]] = None,
         backend: str = "polars",
         target_date: Optional[str] = None,
         environment: str = "prod",
         dry_run: bool = False,
     ) -> Dict[str, Any]:
-        from platforms.processing.base_processing_subsystem.subsystem5_and_30_error_event_schema_and_escalate import (
-            ErrorEventLog,
-            ErrorLevel,
-        )
+        from platforms.processing.base_processing_subsystem import ErrorEventLog, ErrorLevel
 
+        # Resolve raw string → ExecutionPhase (CLI passes string, internal callers may pass enum)
+        phase = ExecutionPhase(phase) if not isinstance(phase, ExecutionPhase) else phase
         symbols     = symbols or DEFAULT_SYMBOLS
         target_date = target_date or date.today().isoformat()
         run_id      = make_run_id()

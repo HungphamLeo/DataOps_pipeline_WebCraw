@@ -46,9 +46,7 @@ class SilverProcessor:
         self.base   = base_path
         self.logger = polars_engine.logger
 
-        from platforms.processing.base_processing_subsystem.subsystem10_surrogate_key_generator import (
-            SurrogateKeyGenerator,
-        )
+        from platforms.processing.base_processing_subsystem import SurrogateKeyGenerator
         self.sk_gen = SurrogateKeyGenerator(prefix="STK_", key_length=32)
 
     # ------------------------------------------------------------------
@@ -126,7 +124,7 @@ class SilverProcessor:
     def _dedup(self, df: Any, keys: List[str], run_id: str, source: str) -> Any:
         """Dedup qua DeduplicationEngine (pandas bridge). Fallback KEEP_LAST."""
         import polars as pl
-        from platforms.processing.base_processing_subsystem.subsystem7_deduplication import (
+        from platforms.processing.base_processing_subsystem import (
             DeduplicationEngine,
             DeduplicationStrategy,
         )
@@ -470,7 +468,7 @@ class SilverExecutor:
         self.logger  = context.logger
 
     def execute(self) -> Dict[str, Any]:
-        from platforms.processing.base_processing_subsystem.subsystem5_and_30_error_event_schema_and_escalate import ErrorLevel
+        from platforms.processing.base_processing_subsystem import ErrorLevel
 
         self.logger.info(
             "[SilverExecutor] Starting silver phase date=%s", self.context.target_date
