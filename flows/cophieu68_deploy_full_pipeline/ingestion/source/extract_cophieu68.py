@@ -1,74 +1,49 @@
 from bs4 import BeautifulSoup
-import requests
 import re
 import time
 from typing import Optional, List, Union, Dict
 import pandas as pd
 from io import StringIO
 from dataclasses import asdict
-from  platforms.ingestion.cophieu68.dto.extract_models import *
+
+from platforms.ingestion.base_crawler import BaseHttpCrawler
+from flows.cophieu68_deploy_full_pipeline.ingestion.dto.extract_models import (
+    StockFinancialReport, IndustrySummaryInfo, IndustryFinancialInfo,
+    IndustryCapitalInfo, BalanceSheet, IncomeStatement, StockFinancialRatios,
+    DetailsMatchRow, DetailsMatchReport, BusinessPlanRow,
+    CompanyProfile, TradingRecord,
+    CompanyBelongToIndustrySector, CompanyBelongToMarketType,
+    INDUSTRIAL_INFO_TYPE, CRAWL_COMPANY_PROFILE_CONFIG,
+    CRAWL_MARKET_LIST_CONFIG, MAPPING_INDUSTRY_CODE,
+)
 
 
-class Cophieu68BeautifulSoupCrawler:
+class Cophieu68BeautifulSoupCrawler(BaseHttpCrawler):
+    """
+    Domain-specific crawler cho cophieu68.com.
+    Extend BaseHttpCrawler từ platforms/ingestion/base_crawler.py.
+    """
     def __init__(self, pipeline_config, pipeline_logger):
         config = pipeline_config
         self.crawler_cfg = config["sources"]["cophieu68"]
-        self.urls = self.crawler_cfg["base_url"]
-        self.delay = config["http"].get("delay_seconds", 0.2)
-        self.timeout =  config["http"].get("timeout_seconds", 30)
-        self.session = requests.Session()
-        self.session.headers.update(config["http"].get("headers", {}))
-        self.logger = pipeline_logger
+        super().__init__(
+            base_url=self.crawler_cfg["base_url"],
+            delay_seconds=config["http"].get("delay_seconds", 0.2),
+            timeout_seconds=config["http"].get("timeout_seconds", 30),
+            headers=config["http"].get("headers", {}),
+            logger=pipeline_logger,
+        )
+        self.urls = self.base_url
+        # get_soup, safe_extract_text, extract_number — inherited from BaseHttpCrawler
 
-
-    def get_soup(self, url: str, retries: int = 3) -> Optional[BeautifulSoup]:
-        for attempt in range(retries):
-            try:
-                response = self.session.get(url, timeout=self.timeout)
-                response.raise_for_status()
-                response.encoding = "utf-8"
-                soup = BeautifulSoup(response.text, "html.parser")
-                time.sleep(self.delay)
-                return soup
-            except Exception as e:
-                self.logger.warning(f"Error fetching {url} (attempt {attempt + 1}): {e}")
-                if attempt < retries - 1:
-                    time.sleep(2 ** attempt)
-                    continue
-                else:
-                    self.logger.error(f"Failed to fetch {url} after {retries} attempts")
-                    return None
-
-    def safe_extract_text(self, soup: BeautifulSoup, 
-                                selector: str, 
-                                multiple: bool = False) -> Union[str, List[str]]:
-        """
-        An toàn trích xuất text từ selector
-
-        :param soup: Điểm khởi đầu để tìm kiếm
-        :param selector: Chọn lọc để tìm kiếm
-        :param multiple: Nếu True, trả về List[str], ngược lại trả về str
-        :return: Text được trích xuất nếu thành công, ngược lại trả về rỗng
-        """
-        try:
-            if multiple:
-                return [el.get_text(strip=True) for el in soup.select(selector)]
-            element = soup.select_one(selector)
-            return element.get_text(strip=True) if element else ""
-        except Exception:
-            return [] if multiple else ""
-
-    def extract_number(self, text: str) -> str:
-        if not text:
-            return ""
-        return re.sub(r"[^\d.,\-]", "", text)
 
 class ExtractCophieu68(Cophieu68BeautifulSoupCrawler):
-    def __init__(self, pipeline_config=None, pipeline_logger=None):
-        if pipeline_config is not None or pipeline_logger is not None:
-            super().__init__(pipeline_config, pipeline_logger)
-        else:
-            super().__init__()
+    """
+    Concrete crawler cho tất cả endpoints của cophieu68.com.
+    Kế thừa HTTP utilities từ BaseHttpCrawler (platforms).
+    """
+    def __init__(self, pipeline_config, pipeline_logger):
+        super().__init__(pipeline_config, pipeline_logger)
         self.endpoint = self.crawler_cfg["endpoints"]
     
     

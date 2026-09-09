@@ -1,219 +1,235 @@
+"""
+PostgreSQL Storage Backend
+===========================
+Refactored with:
+  - Connection pooling (psycopg2 ThreadedConnectionPool)
+  - Proper upsert (INSERT ... ON CONFLICT DO UPDATE)
+  - Staging schema support
+  - IRelationalStorage interface compliance
+  - No print() calls — structured logging only
+
+SRP: only handles DB I/O, no business logic.
+OCP: extend via subclassing, not by modifying this class.
+LSP: PostgreSQLStorageBackend is a drop-in replacement for StorageBackend.
+ISP: IRelationalStorage + StorageBackend are separate interfaces.
+DIP: Callers depend on IRelationalStorage abstraction, not this concrete class.
+"""
+
 from __future__ import annotations
+
 import logging
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
-from platforms.storage.base_storage import StorageBackend
+
 import psycopg2
+from psycopg2 import pool as pg_pool
+
+from platforms.storage.base_storage import IRelationalStorage, StorageBackend
 
 
-class PostgreSQLWriter:
+class PostgreSQLWriter(IRelationalStorage):
     """
-    Lightweight PostgreSQL writer. Uses psycopg2 for database interactions.
+    Thread-safe PostgreSQL writer with connection pooling.
+
+    Parameters
+    ----------
+    host, port, database, username, password : connection params.
+    pool_min, pool_max : connection pool bounds (default 1–5).
     """
 
-    def __init__(self, host: str, port: int, database: str, username: str, password: str, logger: Optional[logging.Logger] = None):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        database: str,
+        username: str,
+        password: str,
+        pool_min: int = 1,
+        pool_max: int = 5,
+        logger: Optional[logging.Logger] = None,
+    ) -> None:
         self.host = host
         self.port = port
         self.database = database
         self.user = username
         self.password = password
         self.logger = logger or logging.getLogger(__name__)
-        
-
-
-    def _get_connection(self):
-        
-        return psycopg2.connect(
-            host=self.host,
-            port=self.port,
-            database=self.database,
-            user=self.user,
-            password=self.password
+        self._pool = pg_pool.ThreadedConnectionPool(
+            pool_min,
+            pool_max,
+            host=host,
+            port=port,
+            database=database,
+            user=username,
+            password=password,
         )
 
-    def insert(self, table: str, data: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Insert list of dictionaries into a PostgreSQL table."""
-        if not data:
-            return {"inserted_count": 0}
+    # ------------------------------------------------------------------
+    # Connection management
+    # ------------------------------------------------------------------
 
-        keys = data[0].keys()
-        columns = ', '.join(keys)
-        values_placeholder = ', '.join([f'%({key})s' for key in keys])
-        query = f"INSERT INTO {table} ({columns}) VALUES ({values_placeholder})"
-
+    @contextmanager
+    def _conn(self):
+        """Acquire a connection from the pool, release on exit."""
+        conn = self._pool.getconn()
         try:
-            with self._get_connection() as conn:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
+
+    def close(self) -> None:
+        """Close all connections in the pool."""
+        self._pool.closeall()
+
+    # ------------------------------------------------------------------
+    # IRelationalStorage implementation
+    # ------------------------------------------------------------------
+
+    def execute(self, sql: str, params: Optional[tuple] = None) -> Dict[str, Any]:
+        """Execute a DDL / DML statement."""
+        try:
+            with self._conn() as conn:
                 with conn.cursor() as cur:
-                    cur.executemany(query, data)
-                    conn.commit()
-                    self.logger.info("Inserted %d rows into %s", len(data), table)
-                    return {"inserted_count": len(data)}
-        except Exception as e:
-            self.logger.error("Insert failed: %s", e)
-            return {"inserted_count": 0, "error": str(e)}
+                    cur.execute(sql, params)
+            return {"ok": True}
+        except Exception as exc:
+            self.logger.error("[PG] execute failed: %s", exc)
+            return {"ok": False, "error": str(exc)}
+
+    def query(self, sql: str, params: Optional[tuple] = None) -> Dict[str, Any]:
+        """Execute a SELECT and return results."""
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql, params)
+                    cols = [d[0] for d in cur.description]
+                    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            return {"ok": True, "results": rows}
+        except Exception as exc:
+            self.logger.error("[PG] query failed: %s", exc)
+            return {"ok": False, "error": str(exc), "results": []}
+
+    def insert(self, target: str, data: Any) -> Dict[str, Any]:
+        """Plain INSERT (no conflict handling)."""
+        if not data:
+            return {"ok": True, "inserted_count": 0}
+        if not isinstance(data, list):
+            data = [data]
+        keys = list(data[0].keys())
+        cols = ", ".join(f'"{k}"' for k in keys)
+        placeholders = ", ".join(f"%({k})s" for k in keys)
+        sql = f'INSERT INTO {target} ({cols}) VALUES ({placeholders})'
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.executemany(sql, data)
+            self.logger.info("[PG] Inserted %d rows into %s", len(data), target)
+            return {"ok": True, "inserted_count": len(data)}
+        except Exception as exc:
+            self.logger.error("[PG] insert into %s failed: %s", target, exc)
+            return {"ok": False, "inserted_count": 0, "error": str(exc)}
+
+    def upsert(
+        self,
+        target: str,
+        data: List[Dict[str, Any]],
+        conflict_columns: List[str],
+        update_columns: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        INSERT ... ON CONFLICT (conflict_columns) DO UPDATE SET ...
+
+        If *update_columns* is None, all non-conflict columns are updated.
+        """
+        if not data:
+            return {"ok": True, "upserted_count": 0}
+
+        keys = list(data[0].keys())
+        cols = ", ".join(f'"{k}"' for k in keys)
+        placeholders = ", ".join(f"%({k})s" for k in keys)
+        conflict_cols = ", ".join(f'"{c}"' for c in conflict_columns)
+
+        upd_cols = update_columns or [k for k in keys if k not in conflict_columns]
+        if not upd_cols:
+            # All columns are conflict keys — just skip on conflict
+            do_clause = "DO NOTHING"
+        else:
+            set_pairs = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in upd_cols)
+            do_clause = f"DO UPDATE SET {set_pairs}"
+
+        sql = (
+            f'INSERT INTO {target} ({cols}) VALUES ({placeholders}) '
+            f'ON CONFLICT ({conflict_cols}) {do_clause}'
+        )
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.executemany(sql, data)
+            self.logger.info("[PG] Upserted %d rows into %s", len(data), target)
+            return {"ok": True, "upserted_count": len(data)}
+        except Exception as exc:
+            self.logger.error("[PG] upsert into %s failed: %s", target, exc)
+            return {"ok": False, "upserted_count": 0, "error": str(exc)}
+
+    def bulk_insert(self, table: str, data: Any) -> Dict[str, Any]:
+        """Accept DataFrame or list-of-dicts and INSERT."""
+        try:
+            import pandas as pd
+
+            if isinstance(data, pd.DataFrame):
+                data = data.to_dict("records")
+        except ImportError:
+            pass
+        return self.insert(table, data)
+
+    # ------------------------------------------------------------------
+    # Schema management helpers
+    # ------------------------------------------------------------------
+
+    def ensure_schema(self, schema: str) -> Dict[str, Any]:
+        """CREATE SCHEMA IF NOT EXISTS."""
+        return self.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+
+    def execute_script(self, sql_script: str) -> Dict[str, Any]:
+        """Execute a multi-statement SQL script (separated by ';')."""
+        statements = [s.strip() for s in sql_script.split(";") if s.strip()]
+        errors = []
+        for stmt in statements:
+            res = self.execute(stmt)
+            if not res.get("ok"):
+                errors.append(res.get("error", "unknown"))
+        if errors:
+            return {"ok": False, "errors": errors}
+        return {"ok": True, "statements_executed": len(statements)}
 
 
 class PostgreSQLStorageBackend(StorageBackend):
-    """Adapter to expose PostgreSQLWriter as StorageBackend."""
+    """
+    Adapter: exposes PostgreSQLWriter as a StorageBackend (legacy interface).
 
-    def __init__(self, pipeline_logger, postgres_writter: PostgreSQLWriter):
-        self.pg = postgres_writter
+    Callers that already use StorageBackend.save() continue to work unchanged.
+    """
+
+    def __init__(
+        self,
+        pipeline_logger: Optional[logging.Logger],
+        postgres_writer: PostgreSQLWriter,
+    ) -> None:
+        self.pg = postgres_writer
         self.logger = pipeline_logger or logging.getLogger(__name__)
-        print(self.pg.user)
 
-    def save(self, dataset_name: str, data: Any, fmt: Optional[str] = None) -> Dict[str, Any]:
+    def save(self, dataset_name: str, data: Any,
+             fmt: Optional[str] = None) -> Dict[str, Any]:
         """Save data to a PostgreSQL table."""
         try:
             if not isinstance(data, list):
                 data = [data]
             result = self.pg.insert(dataset_name, data)
             return {"ok": True, **result}
-        except Exception as e:
-            self.logger.exception("PostgreSQL save failed")
-            return {"ok": False, "error": str(e)}
-
-    def create_database(self, name: str) -> Dict[str, Any]:
-        """Create a new PostgreSQL database."""
-        try:
-            with self.pg._get_connection() as conn:
-                conn.autocommit = True
-                with conn.cursor() as cur:
-                    cur.execute(f"CREATE DATABASE {name}")
-                    return {"ok": True, "database": name}
-        except Exception as e:
-            self.logger.error("Create database failed: %s", e)
-            return {"ok": False, "error": str(e)}
-
-    def delete_database(self, name: str) -> Dict[str, Any]:
-        """Delete a PostgreSQL database."""
-        try:
-            with self.pg._get_connection() as conn:
-                conn.autocommit = True
-                with conn.cursor() as cur:
-                    cur.execute(f"DROP DATABASE IF EXISTS {name}")
-                    return {"ok": True, "database": name}
-        except Exception as e:
-            self.logger.error("Delete database failed: %s", e)
-            return {"ok": False, "error": str(e)}
-
-    def create_schema(self, name: str, schema: Optional[Dict] = None) -> Dict[str, Any]:
-        """Create a schema in the PostgreSQL database."""
-        try:
-            with self.pg._get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(f"CREATE SCHEMA IF NOT EXISTS {name}")
-                    return {"ok": True, "schema": name}
-        except Exception as e:
-            self.logger.error("Create schema failed: %s", e)
-            return {"ok": False, "error": str(e)}
-
-    def rename_schema(self, old_name: str, new_name: str) -> Dict[str, Any]:
-        """Rename a schema in the PostgreSQL database."""
-        try:
-            with self.pg._get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(f"ALTER SCHEMA {old_name} RENAME TO {new_name}")
-                    return {"ok": True, "from": old_name, "to": new_name}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
-
-    def create_table(self, name: str, schema: Optional[Dict] = None) -> Dict[str, Any]:
-        """Create a table in the PostgreSQL database."""
-        try:
-            with self.pg._get_connection() as conn:
-                with conn.cursor() as cur:
-                    columns = ', '.join([f"{col} {dtype}" for col, dtype in schema.items()]) if schema else "id SERIAL PRIMARY KEY"
-                    cur.execute(f"CREATE TABLE IF NOT EXISTS {name} ({columns})")
-                    return {"ok": True, "table": name}
-        except Exception as e:
-            self.logger.error("Create table failed: %s", e)
-            return {"ok": False, "error": str(e)}
-
-    def truncate_table(self, name: str) -> Dict[str, Any]:
-        """Truncate a table in the PostgreSQL database."""
-        try:
-            with self.pg._get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(f"TRUNCATE TABLE {name}")
-                    return {"ok": True, "table": name}
-        except Exception as e:
-            self.logger.error("Truncate table failed: %s", e)
-            return {"ok": False, "error": str(e)}
-
-    def delete_table(self, name: str) -> Dict[str, Any]:
-        """Delete a table in the PostgreSQL database."""
-        try:
-            with self.pg._get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(f"DROP TABLE IF EXISTS {name}")
-                    return {"ok": True, "table": name}
-        except Exception as e:
-            self.logger.error("Delete table failed: %s", e)
-            return {"ok": False, "error": str(e)}
-
-    def rename_table(self, old_name: str, new_name: str) -> Dict[str, Any]:
-        """Rename a table in the PostgreSQL database."""
-        try:
-            with self.pg._get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(f"ALTER TABLE {old_name} RENAME TO {new_name}")
-                    return {"ok": True, "from": old_name, "to": new_name}
-        except Exception as e:
-            self.logger.error("Rename table failed: %s", e)
-            return {"ok": False, "error": str(e)}
-
-    def insert(self, target: str, data: Any) -> Dict[str, Any]:
-        """Insert data into a PostgreSQL table."""
-        try:
-            result = self.pg.insert(target, data)
-            return {"ok": True, **result}
-        except Exception as e:
-            self.logger.error("Insert failed: %s", e)
-            return {"ok": False, "error": str(e)}
-
-    def update(self, target: str, query: Dict[str, Any], update_doc: Dict[str, Any]) -> Dict[str, Any]:
-        """Update rows in a PostgreSQL table."""
-        try:
-            with self.pg._get_connection() as conn:
-                with conn.cursor() as cur:
-                    set_clause = ', '.join([f"{k} = %s" for k in update_doc.keys()])
-                    where_clause = ' AND '.join([f"{k} = %s" for k in query.keys()])
-                    values = list(update_doc.values()) + list(query.values())
-                    cur.execute(f"UPDATE {target} SET {set_clause} WHERE {where_clause}", values)
-                    conn.commit()
-                    return {"ok": True, "updated_count": cur.rowcount}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
-
-    def execute(self, sql: str, params: Optional[tuple] = None) -> Dict[str, Any]:
-        """Execute a raw SQL query."""
-        try:
-            with self.pg._get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(sql, params)
-                    conn.commit()
-                    return {"ok": True}
-        except Exception as e:
-            self.logger.error("Execute failed: %s", e)
-            return {"ok": False, "error": str(e)}
-    
-    def bulk_insert(self, table: str, data) -> Dict[str, Any]:
-        """Bulk insert data into a PostgreSQL table."""
-        import pandas as pd
-        if isinstance(data, pd.DataFrame):
-            data = data.to_dict('records')
-        return self.insert(table.upper(), data)
-    
-    def query(self, sql: str, params: Optional[tuple] = None) -> Dict[str, Any]:
-        """Execute a query and return results."""
-        try:
-            with self.pg._get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(sql, params)
-                    rows = cur.fetchall()
-                    columns = [desc[0] for desc in cur.description]
-                    results = [dict(zip(columns, row)) for row in rows]
-                    return {"ok": True, "results": results}
-        except Exception as e:
-            self.logger.error("Query failed: %s", e)
-            return {"ok": False, "error": str(e)}
-            
+        except Exception as exc:
+            self.logger.exception("[PG] StorageBackend.save failed")
+            return {"ok": False, "error": str(exc)}
