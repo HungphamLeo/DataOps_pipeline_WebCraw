@@ -1,0 +1,14 @@
+
+*.yaml
+*.json
+*.sh
+.env
+*.log
+*.pyc
+*.csv
+*.yml
+*.png
+*.txt
+*.ipynb
+.md
+__pycache__/
