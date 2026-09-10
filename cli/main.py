@@ -82,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--backend", "-b",
         default="polars",
-        choices=["polars", "spark", "duckdb", "sqlmesh", "dbt"],
+        choices=["polars", "dbt"],
         help="Processing engine backend (default: polars)",
     )
     parser.add_argument(

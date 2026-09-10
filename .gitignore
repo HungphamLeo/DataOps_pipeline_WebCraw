@@ -1,4 +1,4 @@
-
+_all_skills/
 *.yaml
 *.json
 *.sh
@@ -10,5 +10,5 @@
 *.png
 *.txt
 *.ipynb
-.md
+*.md
 __pycache__/

@@ -1,16 +1,20 @@
 """
 builders.py — Factory functions cho pipeline cophieu68
 ======================================================
-Layer này là cầu nối giữa platforms/ (tech stack base) và flows/ (domain logic).
+Cầu nối giữa platforms/ (tech stack base) và flows/ (domain logic).
 
-Mỗi function nhận config dict và trả về một engine/client đã được
-configure sẵn từ platforms layer. Flow code chỉ gọi builders, không
-import trực tiếp từ platforms.
+Mỗi function nhận config dict → trả về engine/client đã configure từ platforms layer.
 
 Nguyên tắc:
   - Không chứa business logic
-  - Không đọc env var trực tiếp (đã được context.py tập trung)
+  - Không đọc env var trực tiếp (đã tập trung trong context.py)
   - Mỗi function chỉ tạo 1 loại dependency
+
+Stack thực tế đang dùng:
+  - PolarsEngine    → bronze (write Parquet) + silver (read/write Parquet)
+  - DbtRunner       → silver (transform models) + gold (aggregate/mart models)
+  - PostgreSQLWriter → serving (normalized tables)
+  - MinioStorageBackend → optional direct object operations
 """
 from __future__ import annotations
 
@@ -27,9 +31,6 @@ from flows.cophieu68_deploy_full_pipeline.context import (
     S3_ENDPOINT,
     S3_KEY,
     S3_SECRET,
-    S3_ENDPOINT_URL,
-    SQLMESH_GATEWAY,
-    SQLMESH_PATH,
     STORAGE_OPTIONS,
 )
 
@@ -40,7 +41,7 @@ def _params(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Processing engines — lấy từ platforms/processing/
+# PolarsEngine — bronze + silver read/write Parquet to S3/MinIO
 # ---------------------------------------------------------------------------
 
 def build_polars_engine(config: Dict[str, Any]):
@@ -60,48 +61,26 @@ def build_polars_engine(config: Dict[str, Any]):
     )
 
 
-def build_duckdb_engine(config: Optional[Dict[str, Any]] = None):
-    """Khởi tạo DuckDBEngine in-memory với S3 credentials từ platforms."""
-    from platforms.processing.duckdb.duckdb_engine import DuckDBConfig, DuckDBEngine
-    from shared.logger.python_main_logger import logger_manager
+# ---------------------------------------------------------------------------
+# DbtRunner — silver transform models + gold aggregate/mart models
+# ---------------------------------------------------------------------------
 
-    duck_cfg = DuckDBConfig(
-        database_path=":memory:",
-        storage_options=STORAGE_OPTIONS,
-    )
-    return DuckDBEngine(
-        config=duck_cfg,
-        logger=logger_manager.get_logger("duckdb_engine"),
-    )
-
-
-def build_sqlmesh_engine(config: Optional[Dict[str, Any]] = None):
-    """Khởi tạo SqlMeshEngine từ platforms."""
-    from platforms.processing.sqlmesh.sqlmesh_engine import SqlMeshConfig, SqlMeshEngine
-    from shared.logger.python_main_logger import logger_manager
-
-    cfg = SqlMeshConfig(
-        project_path=SQLMESH_PATH,
-        gateway=SQLMESH_GATEWAY,
-    )
-    return SqlMeshEngine(
-        config=cfg,
-        logger=logger_manager.get_logger("sqlmesh_engine"),
-    )
-
-
-def build_dbt_runner(config: Dict[str, Any]):
+def build_dbt_runner(config: Optional[Dict[str, Any]] = None):
     """
     Khởi tạo DbtRunner từ platforms/processing/dbt/.
+    Đọc dbt config từ project_params.dbt (hoặc dùng defaults).
     """
     from platforms.processing.dbt.base_dbt import DbtConfig, DbtRunner
 
-    params = _params(config)
+    params = _params(config) if config else {}
     dbt_cfg_dict = params.get("dbt", {})
-    project_dir = dbt_cfg_dict.get("project_dir", Path(__file__).parents[2] / "dbt_project")
+    project_dir  = dbt_cfg_dict.get(
+        "project_dir",
+        Path(__file__).parents[2] / "dbt_project",
+    )
     profiles_dir = dbt_cfg_dict.get("profiles_dir")
-    target = dbt_cfg_dict.get("target")
-    vars_dict = dbt_cfg_dict.get("vars", {})
+    target       = dbt_cfg_dict.get("target")
+    vars_dict    = dbt_cfg_dict.get("vars", {})
 
     cfg = DbtConfig(
         project_dir=project_dir,
@@ -113,22 +92,8 @@ def build_dbt_runner(config: Dict[str, Any]):
 
 
 # ---------------------------------------------------------------------------
-# Storage backends — lấy từ platforms/storage/
+# PostgreSQLWriter — serving normalized tables
 # ---------------------------------------------------------------------------
-
-def build_minio_backend():
-    """Khởi tạo MinioStorageBackend từ platforms/storage/minio/."""
-    from platforms.storage.minio.minio_storage import MinioStorageBackend
-    from shared.logger.python_main_logger import logger_manager
-
-    return MinioStorageBackend(
-        endpoint=S3_ENDPOINT,
-        access_key=S3_KEY,
-        secret_key=S3_SECRET,
-        secure=False,
-        logger=logger_manager.get_logger("minio_storage"),
-    )
-
 
 def build_pg_writer():
     """
@@ -154,7 +119,25 @@ def build_pg_writer():
 
 
 # ---------------------------------------------------------------------------
-# Ingestion extractor — lấy từ platforms/ingestion/
+# MinioStorageBackend — optional direct object operations
+# ---------------------------------------------------------------------------
+
+def build_minio_backend():
+    """Khởi tạo MinioStorageBackend từ platforms/storage/minio/."""
+    from platforms.storage.minio.minio_storage import MinioStorageBackend
+    from shared.logger.python_main_logger import logger_manager
+
+    return MinioStorageBackend(
+        endpoint=S3_ENDPOINT,
+        access_key=S3_KEY,
+        secret_key=S3_SECRET,
+        secure=False,
+        logger=logger_manager.get_logger("minio_storage"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# ExtractCophieu68 — ingestion
 # ---------------------------------------------------------------------------
 
 def build_extractor(config: Dict[str, Any]):
@@ -180,7 +163,7 @@ def build_extractor(config: Dict[str, Any]):
 
 def build_dq_ruleset(table_name: str):
     """
-    Tạo DAMA-compliant DataQualityRuleSet cho bảng dữ liệu (ví dụ: cophieu68 bronze/silver/gold).
+    Tạo DAMA-compliant DataQualityRuleSet cho bảng dữ liệu.
     """
     from platforms.governance.data_quality.dq_dimensions import (
         DQDimension,
@@ -191,14 +174,12 @@ def build_dq_ruleset(table_name: str):
 
     ruleset = DataQualityRuleSet(name=f"dq_ruleset_{table_name}")
 
-    def check_completeness(df: Any) -> tuple[bool, float, str]:
-        # Rule: Không có null trong trường symbol hoặc date
+    def check_completeness(df: Any) -> tuple:
         if hasattr(df, "is_empty") and df.is_empty():
             return False, 0.0, "Dataset is empty"
         return True, 1.0, "Completeness verified"
 
-    def check_validity(df: Any) -> tuple[bool, float, str]:
-        # Rule: close_price > 0 nếu có
+    def check_validity(df: Any) -> tuple:
         return True, 1.0, "Validity verified"
 
     ruleset.add_rule(DataQualityRule(
@@ -208,7 +189,6 @@ def build_dq_ruleset(table_name: str):
         check_fn=check_completeness,
         severity=DQSeverity.CRITICAL,
     ))
-
     ruleset.add_rule(DataQualityRule(
         rule_id=f"{table_name}_validity_check",
         dimension=DQDimension.VALIDITY,
@@ -216,7 +196,6 @@ def build_dq_ruleset(table_name: str):
         check_fn=check_validity,
         severity=DQSeverity.WARNING,
     ))
-
     return ruleset
 
 
@@ -230,7 +209,7 @@ def build_cleansing_rules(symbol: str):
     def symbol_not_null(rec: Dict[str, Any]) -> Tuple[bool, str]:
         val = rec.get("symbol")
         if not val:
-            return False, f"symbol is null"
+            return False, "symbol is null"
         return True, ""
 
     def positive_close(rec: Dict[str, Any]) -> Tuple[bool, str]:

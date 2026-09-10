@@ -65,13 +65,6 @@ DEFAULT_CONFIG_PATH = (
     / "cophieu68_config.yaml"
 )
 
-SQLMESH_PATH: str = os.getenv(
-    "SQLMESH_PATH",
-    str(PROJECT_ROOT / "platforms" / "processing" / "sqlmesh"),
-)
-SQLMESH_GATEWAY: str = os.getenv("SQLMESH_GATEWAY", "local_duckdb")
-
-
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
@@ -86,11 +79,8 @@ class ExecutionPhase(str, Enum):
 
 
 class ProcessingBackend(str, Enum):
-    POLARS   = "polars"
-    SPARK    = "spark"
-    SQLMESH  = "sqlmesh"
-    DUCKDB   = "duckdb"
-    DBT      = "dbt"
+    POLARS = "polars"
+    DBT    = "dbt"
 
 
 # ---------------------------------------------------------------------------

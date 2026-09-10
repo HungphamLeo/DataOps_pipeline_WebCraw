@@ -5,30 +5,34 @@ serving.py — Serving Phase Module
 
 Luồng chi tiết:
   MinIO silver/<table>/ (Parquet)
-    → [DuckDB httpfs đọc]
+    → PolarsEngine.read_parquet()
     → staging.<table> (TEXT columns, raw load)
     → [PostgreSQL SQL: dedup + NULLIF cast + type cast]
     → normalized.<table> (typed columns, ON CONFLICT upsert)
 
 Dùng:
-  - platforms/storage/postgre/base_postgre.py → PostgreSQLWriter
-  - platforms/processing/duckdb/              → DuckDBEngine (đọc S3 Parquet)
+  - platforms/storage/postgre/base_postgre.py  → PostgreSQLWriter
+  - platforms/processing/polars/polars_engine  → đọc Silver Parquet từ S3
+  - flows/.../schema/schema_registry           → auto-generate staging + normalized DDL
 
 Không chứa:
   - Crawl web, Polars transforms (bronze/silver)
-  - SQLMesh models (gold.py)
+  - dbt models (gold.py)
   - CLI (run.py)
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from flows.cophieu68_deploy_full_pipeline.context import (
     ExecutionContext,
     LAKEHOUSE_BASE,
 )
-from flows.cophieu68_deploy_full_pipeline.builders import build_pg_writer, build_duckdb_engine
+from flows.cophieu68_deploy_full_pipeline.builders import build_pg_writer, build_polars_engine
+from flows.cophieu68_deploy_full_pipeline.schema import (
+    ALL_SILVER_TABLES,
+    ALL_GOLD_TABLES,
+)
 
 
 class ServingProcessor:
@@ -47,37 +51,64 @@ class ServingProcessor:
     def __init__(
         self,
         pg_writer,                 # PostgreSQLWriter từ platforms
-        duck_engine,               # DuckDBEngine từ platforms (đã cấu hình S3)
+        polars_engine,             # PolarsEngine từ platforms (đọc/ghi Parquet S3)
         lakehouse_base: str = LAKEHOUSE_BASE,
         logger=None,
     ) -> None:
         import logging
         self.pg     = pg_writer
-        self.duck   = duck_engine
+        self.polars = polars_engine
         self.base   = lakehouse_base.rstrip("/")
         self.logger = logger or logging.getLogger(__name__)
 
     # ------------------------------------------------------------------
-    # Internal: đọc Parquet từ MinIO qua DuckDB httpfs
+    # Schema management — auto-create staging + normalized tables từ registry
+    # ------------------------------------------------------------------
+
+    def ensure_schemas(self) -> None:
+        """
+        Tạo staging + normalized PG schemas và tất cả tables từ schema_registry.
+        Idempotent (CREATE TABLE IF NOT EXISTS) — safe khi chạy nhiều lần.
+        """
+        for schema_name in (self.STAGING, self.NORMALIZED):
+            self.pg.execute(f"CREATE SCHEMA IF NOT EXISTS {schema_name}")
+            self.logger.info("[Serving] Ensured PG schema: %s", schema_name)
+
+        # Staging tables (all TEXT) — từ Silver registry
+        for tbl_name, tbl_def in ALL_SILVER_TABLES.items():
+            ddl = tbl_def.to_staging_ddl(self.STAGING)
+            self.pg.execute(ddl)
+            self.logger.debug("[Serving] Ensured staging.%s", tbl_name)
+
+        # Normalized tables (typed) — từ Gold registry
+        for tbl_name, tbl_def in ALL_GOLD_TABLES.items():
+            ddl = tbl_def.to_pg_ddl(self.NORMALIZED)
+            self.pg.execute(ddl)
+            self.logger.debug("[Serving] Ensured normalized.%s", tbl_name)
+
+        self.logger.info(
+            "[Serving] Schema bootstrap: staging=%d tables, normalized=%d tables",
+            len(ALL_SILVER_TABLES), len(ALL_GOLD_TABLES),
+        )
+
+    # ------------------------------------------------------------------
+    # Internal: đọc Parquet từ MinIO qua PolarsEngine
     # ------------------------------------------------------------------
 
     def _read_silver(self, silver_table: str) -> Optional[List[Dict[str, Any]]]:
-        """Đọc silver/<table>/**/*.parquet qua DuckDB, trả về list of dicts (all str)."""
+        """
+        Đọc silver/<table>/**/*.parquet qua PolarsEngine, trả về list of dicts (all str).
+        Dùng Silver TableDef từ schema_registry để biết expected columns.
+        """
         import polars as pl
 
-        glob_path = f"{self.base}/silver/{silver_table}/**/*.parquet"
+        path = f"{self.base}/silver/{silver_table}/**/*.parquet"
         try:
-            df_lazy = self.duck.query_to_polars(
-                f"SELECT * FROM read_parquet('{glob_path}', hive_partitioning=true)"
-            )
-            df = df_lazy.collect()
+            df = self.polars.read_parquet(path)
             if df.is_empty():
                 return None
             # Cast tất cả sang str để match staging TEXT schema
-            str_exprs = [
-                pl.col(c).cast(pl.Utf8, strict=False).alias(c)
-                for c in df.columns
-            ]
+            str_exprs = [pl.col(c).cast(pl.Utf8, strict=False).alias(c) for c in df.columns]
             df = df.with_columns(str_exprs)
             return df.to_pandas().where(lambda x: x.notna(), None).to_dict("records")
         except Exception as exc:
@@ -412,15 +443,18 @@ class ServingExecutor:
             )
             return {**result, "skipped": True, "reason": "missing_pg_credentials"}
 
-        duck = build_duckdb_engine(self.config)
+        polars_engine = build_polars_engine(self.config)
         proc = ServingProcessor(
             pg_writer=pg,
-            duck_engine=duck,
+            polars_engine=polars_engine,
             lakehouse_base=LAKEHOUSE_BASE,
             logger=self.logger,
         )
 
         try:
+            # ── Bootstrap PG schemas + tables từ schema_registry (idempotent) ──
+            proc.ensure_schemas()
+
             sync_result = proc.run_all(run_id=self.context.run_id)
             result["details"] = sync_result["tables"]
             result["tables_synced"] = sync_result["total_rows_out"]
@@ -431,7 +465,6 @@ class ServingExecutor:
             result["errors"] += 1
         finally:
             pg.close()
-            duck.close()
 
         self.logger.info(
             "[ServingExecutor] Done tables_synced=%d errors=%d",

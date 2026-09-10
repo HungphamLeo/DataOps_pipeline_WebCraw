@@ -1,10 +1,17 @@
 """
 platforms/processing/base_processing_subsystem/
 ================================================
-Layer: Platform Processing — Core processing primitives.
-Responsibility: Self-contained error model, metadata repo, deduplication,
-                surrogate key generation. Domain-agnostic.
-Does NOT contain: crawl logic, MinIO/PG I/O, Polars/DuckDB engines.
+Layer: Platform Processing — core processing primitives.
+
+Chứa các building blocks domain-agnostic được dùng bởi mọi flow:
+  - Error / Event model   (ErrorLevel, ErrorEvent, ErrorEventLog)
+  - Metadata repository   (MetadataRepository)
+  - Surrogate key gen     (SurrogateKeyGenerator)
+  - Deduplication engine  (DeduplicationEngine, DeduplicationStrategy)
+  - Data profiler         (DataProfiler)
+  - Cleansing rule set    (CleansingRuleSet)
+
+Không chứa: crawl logic, MinIO/PG I/O, Polars/dbt engines.
 """
 from __future__ import annotations
 
@@ -14,13 +21,13 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Error / Event model  (subsystem 5 + 30)
+# Error / Event model
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ErrorLevel(str, Enum):
@@ -37,7 +44,9 @@ class ErrorEvent:
     job_name:      str
     error_level:   ErrorLevel
     error_message: str
-    timestamp:     str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp:     str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -78,19 +87,21 @@ class ErrorEventLog:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Metadata repository  (subsystem 34)
+# Metadata repository
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class _RunRecord:
-    job_name:    str
-    layer:       str
-    table_name:  str
-    run_id:      str
-    status:      str = "RUNNING"
-    started_at:  str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    ended_at:    Optional[str] = None
-    rows_written: Optional[int] = None
+    job_name:      str
+    layer:         str
+    table_name:    str
+    run_id:        str
+    status:        str           = "RUNNING"
+    started_at:    str           = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    ended_at:      Optional[str] = None
+    rows_written:  Optional[int] = None
     error_message: Optional[str] = None
 
 
@@ -99,17 +110,20 @@ class MetadataRepository:
 
     def __init__(
         self,
-        delta_backend: Any = None,   # reserved for future Delta Lake backend
+        delta_backend: Any = None,
         logger: Optional[logging.Logger] = None,
         in_memory: bool = True,
     ) -> None:
-        self._runs:    Dict[str, _RunRecord] = {}
-        self._lineage: List[Dict[str, Any]]  = []
+        self._runs:    Dict[str, _RunRecord]  = {}
+        self._lineage: List[Dict[str, Any]]   = []
         self.logger    = logger or logging.getLogger(__name__)
 
-    def start_run(self, job_name: str, layer: str, table_name: str, run_id: str) -> None:
+    def start_run(
+        self, job_name: str, layer: str, table_name: str, run_id: str
+    ) -> None:
         self._runs[run_id] = _RunRecord(
-            job_name=job_name, layer=layer, table_name=table_name, run_id=run_id
+            job_name=job_name, layer=layer,
+            table_name=table_name, run_id=run_id,
         )
         self.logger.debug("[Meta] start_run run_id=%s job=%s", run_id, job_name)
 
@@ -159,7 +173,7 @@ class MetadataRepository:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Surrogate key generator  (subsystem 10)
+# Surrogate key generator
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SurrogateKeyGenerator:
@@ -175,7 +189,7 @@ class SurrogateKeyGenerator:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Deduplication engine  (subsystem 7)
+# Deduplication engine
 # ─────────────────────────────────────────────────────────────────────────────
 
 class DeduplicationStrategy(str, Enum):
@@ -205,22 +219,20 @@ class DeduplicationEngine:
         before = len(df)
         if not self.keys or not all(k in df.columns for k in self.keys):
             return df, {"before": before, "after": before, "removed": 0}
-
         if self.tiebreaker_col and self.tiebreaker_col in df.columns:
             df = df.sort_values(self.tiebreaker_col, ascending=True)
-
         keep = "last" if self.strategy == DeduplicationStrategy.KEEP_LAST else "first"
         df   = df.drop_duplicates(subset=self.keys, keep=keep)
         after = len(df)
-
         return df.reset_index(drop=True), {
-            "before": before, "after": after, "removed": before - after,
+            "before": before, "after": after,
+            "removed": before - after,
             "source": source, "run_id": run_id,
         }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Data profiler  (subsystem 1)
+# Data profiler
 # ─────────────────────────────────────────────────────────────────────────────
 
 class DataProfiler:
@@ -229,27 +241,28 @@ class DataProfiler:
     @staticmethod
     def profile(df: pd.DataFrame) -> Dict[str, Any]:
         return {
-            "row_count":      len(df),
-            "column_count":   len(df.columns),
-            "null_counts":    df.isnull().sum().to_dict(),
-            "distinct_counts":{c: df[c].nunique() for c in df.columns},
+            "row_count":       len(df),
+            "column_count":    len(df.columns),
+            "null_counts":     df.isnull().sum().to_dict(),
+            "distinct_counts": {c: df[c].nunique() for c in df.columns},
         }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Cleansing rule set  (subsystem 4)
+# Cleansing rule set
 # ─────────────────────────────────────────────────────────────────────────────
 
 class CleansingRuleSet:
     """
-    Per-record DQ gate. check_fn signature: (record: dict) → (passed: bool, message: str).
+    Per-record DQ gate.
+    check_fn signature: (record: dict) → (passed: bool, message: str)
     """
 
     def __init__(self, table_name: str) -> None:
         self.table_name = table_name
-        self._rules: List[Any] = []
+        self._rules: List[Callable] = []
 
-    def add_rule(self, check_fn: Any) -> "CleansingRuleSet":
+    def add_rule(self, check_fn: Callable) -> "CleansingRuleSet":
         self._rules.append(check_fn)
         return self
 
@@ -260,7 +273,8 @@ class CleansingRuleSet:
             try:
                 result = fn(record)
                 if isinstance(result, tuple):
-                    passed, msg = result[0], result[1] if len(result) > 1 else ""
+                    passed = result[0]
+                    msg    = result[1] if len(result) > 1 else ""
                 else:
                     passed, msg = bool(result), ""
                 if not passed:
