@@ -29,14 +29,11 @@ from platforms.processing.base_processing_subsystem import (
     CleansingRuleSet,
     ErrorLevel,
 )
+from platforms.factory.client_factory import build_polars_engine
 
-from flows.cophieu68_deploy_full_pipeline.context import (
-    ExecutionContext,
-    LAKEHOUSE_BASE,
-    make_batch_id,
-)
+from flows.shared.context import ExecutionContext, make_batch_id
+from flows.cophieu68_deploy_full_pipeline.pipeline_config import Cophieu68PipelineConfig
 from flows.cophieu68_deploy_full_pipeline.builders import (
-    build_polars_engine,
     build_extractor,
     build_cleansing_rules,
 )
@@ -59,7 +56,7 @@ class BronzeIngester:
     def __init__(
         self,
         engine,
-        base_path: str = LAKEHOUSE_BASE,
+        base_path: str = "s3://lakehouse",
         governance_logger: Optional[logging.Logger] = None,
     ) -> None:
         self.engine           = engine
@@ -269,7 +266,11 @@ class BronzeExecutor:
     → flatten → DQ → write Parquet to MinIO.
     """
 
-    def __init__(self, context: ExecutionContext, config: Dict[str, Any]) -> None:
+    def __init__(
+        self,
+        context: ExecutionContext,
+        config: "Cophieu68PipelineConfig",
+    ) -> None:
         self.context = context
         self.config  = config
         self.logger  = context.logger
@@ -458,11 +459,11 @@ class BronzeExecutor:
             "errors": 0,
         }
 
-        engine   = build_polars_engine(self.config)
+        engine   = build_polars_engine(**self.config.polars_build_params)
         gov_log  = logger_manager.get_logger("logger.governance.data_quality")
         ingester = BronzeIngester(
             engine=engine,
-            base_path=LAKEHOUSE_BASE,
+            base_path=self.config.lakehouse_base,
             governance_logger=gov_log,
         )
         extractor    = build_extractor(self.config)

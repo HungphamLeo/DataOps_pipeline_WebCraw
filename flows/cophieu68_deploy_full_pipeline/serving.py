@@ -24,11 +24,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from flows.cophieu68_deploy_full_pipeline.context import (
-    ExecutionContext,
-    LAKEHOUSE_BASE,
-)
-from flows.cophieu68_deploy_full_pipeline.builders import build_pg_writer, build_polars_engine
+from platforms.factory.client_factory import build_polars_engine, build_pg_writer
+
+from flows.shared.context import ExecutionContext
+from flows.cophieu68_deploy_full_pipeline.pipeline_config import Cophieu68PipelineConfig
 from flows.cophieu68_deploy_full_pipeline.schema import (
     ALL_SILVER_TABLES,
     ALL_GOLD_TABLES,
@@ -52,7 +51,7 @@ class ServingProcessor:
         self,
         pg_writer,                 # PostgreSQLWriter từ platforms
         polars_engine,             # PolarsEngine từ platforms (đọc/ghi Parquet S3)
-        lakehouse_base: str = LAKEHOUSE_BASE,
+        lakehouse_base: str = "s3://lakehouse",
         logger=None,
     ) -> None:
         import logging
@@ -423,7 +422,11 @@ class ServingExecutor:
     Dùng ServingProcessor + PostgreSQLWriter từ platforms.
     """
 
-    def __init__(self, context: ExecutionContext, config: Dict[str, Any]) -> None:
+    def __init__(
+        self,
+        context: ExecutionContext,
+        config: "Cophieu68PipelineConfig",
+    ) -> None:
         self.context = context
         self.config  = config
         self.logger  = context.logger
@@ -436,18 +439,18 @@ class ServingExecutor:
         )
         result = {"phase": "serving", "tables_synced": 0, "errors": 0, "details": {}}
 
-        pg = build_pg_writer()
+        pg = build_pg_writer(**self.config.pg_conn_params)
         if pg is None:
             self.logger.warning(
                 "[ServingExecutor] PostgreSQL credentials not set — skipping serving phase"
             )
             return {**result, "skipped": True, "reason": "missing_pg_credentials"}
 
-        polars_engine = build_polars_engine(self.config)
+        polars_engine = build_polars_engine(**self.config.polars_build_params)
         proc = ServingProcessor(
             pg_writer=pg,
             polars_engine=polars_engine,
-            lakehouse_base=LAKEHOUSE_BASE,
+            lakehouse_base=self.config.lakehouse_base,
             logger=self.logger,
         )
 

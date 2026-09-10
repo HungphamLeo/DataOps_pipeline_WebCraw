@@ -20,8 +20,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from flows.cophieu68_deploy_full_pipeline.context import ExecutionContext
-from flows.cophieu68_deploy_full_pipeline.builders import build_dbt_runner
+from platforms.factory.client_factory import build_dbt_runner
+
+from flows.shared.context import ExecutionContext
+from flows.cophieu68_deploy_full_pipeline.pipeline_config import Cophieu68PipelineConfig
 
 
 class GoldProcessor:
@@ -79,7 +81,11 @@ class GoldProcessor:
 class GoldExecutor:
     """Orchestrate Gold phase cho pipeline cophieu68."""
 
-    def __init__(self, context: ExecutionContext, config: Dict[str, Any]) -> None:
+    def __init__(
+        self,
+        context: ExecutionContext,
+        config: "Cophieu68PipelineConfig",
+    ) -> None:
         self.context = context
         self.config  = config
         self.logger  = context.logger
@@ -90,7 +96,7 @@ class GoldExecutor:
         self.logger.info("[GoldExecutor] Starting gold phase date=%s", self.context.target_date)
         result = {"phase": "gold", "run_status": "UNKNOWN", "errors": 0}
 
-        dbt  = build_dbt_runner(self.config)
+        dbt  = build_dbt_runner(**self.config.dbt_build_params)
         proc = GoldProcessor(dbt_runner=dbt)
 
         try:

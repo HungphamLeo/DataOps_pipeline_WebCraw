@@ -24,14 +24,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from flows.cophieu68_deploy_full_pipeline.context import (
-    ExecutionContext,
-    LAKEHOUSE_BASE,
-)
-from flows.cophieu68_deploy_full_pipeline.builders import (
-    build_polars_engine,
-    build_dbt_runner,
-)
+from platforms.factory.client_factory import build_polars_engine, build_dbt_runner
+
+from flows.shared.context import ExecutionContext
+from flows.cophieu68_deploy_full_pipeline.pipeline_config import Cophieu68PipelineConfig
 
 
 class SilverProcessor:
@@ -45,7 +41,7 @@ class SilverProcessor:
         self,
         polars_engine,
         dbt_runner,
-        base_path: str = LAKEHOUSE_BASE,
+        base_path: str = "s3://lakehouse",
     ) -> None:
         self.polars     = polars_engine
         self.dbt        = dbt_runner
@@ -366,7 +362,11 @@ class SilverExecutor:
          sang per-table Polars transforms.
     """
 
-    def __init__(self, context: ExecutionContext, config: Dict[str, Any]) -> None:
+    def __init__(
+        self,
+        context: ExecutionContext,
+        config: "Cophieu68PipelineConfig",
+    ) -> None:
         self.context = context
         self.config  = config
         self.logger  = context.logger
@@ -381,12 +381,12 @@ class SilverExecutor:
             "phase": "silver", "rows_in": 0, "rows_out": 0, "errors": 0
         }
 
-        polars_engine = build_polars_engine(self.config)
-        dbt_runner    = build_dbt_runner(self.config)
+        polars_engine = build_polars_engine(**self.config.polars_build_params)
+        dbt_runner    = build_dbt_runner(**self.config.dbt_build_params)
         proc = SilverProcessor(
             polars_engine=polars_engine,
             dbt_runner=dbt_runner,
-            base_path=LAKEHOUSE_BASE,
+            base_path=self.config.lakehouse_base,
         )
 
         # ── Strategy 1: dbt batch ────────────────────────────────────────
