@@ -9,7 +9,6 @@ Does NOT contain: Direct print statements, hardcoded pipeline business logic, so
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional
 import logging
@@ -90,24 +89,32 @@ class PrefectETLPipelineConfig:
         return self._loggers[key]
 
     @property
-    def cophieu68_extract_logger(self) -> logging.Logger:
+    def ingestion_logger(self) -> logging.Logger:
         return self._get_logger("logger.ingestion")
 
     @property
-    def cophieu68_load_logger(self) -> logging.Logger:
+    def bronze_logger(self) -> logging.Logger:
         return self._get_logger("logger.bronze")
 
     @property
-    def cophieu68_transform_logger(self) -> logging.Logger:
+    def silver_logger(self) -> logging.Logger:
         return self._get_logger("logger.silver")
 
     @property
-    def storage_mongodb(self) -> logging.Logger:
-        return self._get_logger("logger.storage_log.duckdb")
+    def gold_logger(self) -> logging.Logger:
+        return self._get_logger("logger.gold")
 
     @property
-    def storage_postgresql(self) -> logging.Logger:
+    def serving_logger(self) -> logging.Logger:
         return self._get_logger("logger.serving")
+
+    @property
+    def dbt_logger(self) -> logging.Logger:
+        return self._get_logger("logger.dbt")
+
+    @property
+    def data_quality_logger(self) -> logging.Logger:
+        return self._get_logger("logger.data_quality")
 
     # ========== Accessors & convenience ==========
 
@@ -120,18 +127,6 @@ class PrefectETLPipelineConfig:
         self._load_config()
         self._loggers.clear()
 
-    def get_airflow_default_args(self) -> Dict[str, Any]:
-        airflow_config = self.config.get("airflow", {}).get("default_args", {})
-        return {
-            "owner": airflow_config.get("owner", "data-engineering"),
-            "depends_on_past": airflow_config.get("depends_on_past", False),
-            "email_on_failure": airflow_config.get("email_on_failure", True),
-            "email_on_retry": airflow_config.get("email_on_retry", False),
-            "retries": airflow_config.get("retries", 1),
-            "retry_delay": timedelta(seconds=airflow_config.get("retry_delay_sec", 300)),
-            "execution_timeout": timedelta(seconds=airflow_config.get("execution_timeout_sec", 7200)),
-        }
-
     def get_environment(self) -> str:
         return self.config.get("environment", "development")
 
@@ -141,29 +136,8 @@ class PrefectETLPipelineConfig:
     def is_development(self) -> bool:
         return self.get_environment() == "development"
 
-    def get_monitoring_config(self) -> Dict[str, Any]:
-        return self.config.get("monitoring", {})
-
-    # --- Convenience: storage / collections helpers ---
-    def get_mongo_config(self) -> Dict[str, Any]:
-        return self.config.get("storage", {}).get("mongodb", {})
-
     def get_postgres_config(self) -> Dict[str, Any]:
         return self.config.get("storage", {}).get("postgreSQL", {})
 
-    def get_mongodb_collection(self, logical_name: str, default: Optional[str] = None) -> Optional[str]:
-        cols = self.get_mongo_config().get("collections", {})
-        if isinstance(cols, dict):
-            v = cols.get(logical_name)
-            if isinstance(v, dict):
-                return v.get("name", default or logical_name)
-            return v or default or logical_name
-        if isinstance(cols, list):
-            for item in cols:
-                if item.get("id") == logical_name or item.get("name") == logical_name:
-                    return item.get("name")
-        return default or logical_name
-
     def get_postgresql_schema_dw(self) -> str:
-        pg_config = self.get_postgres_config()
-        return pg_config.get("dimensions", "public")
+        return self.get_postgres_config().get("dimensions", "public")

@@ -90,57 +90,6 @@ class LoggerManager:
         for handler in logging.root.handlers:
             handler.addFilter(default_filter)
 
-    def configure_from_project_config(self, project_config_path: str) -> None:
-        """Load logger routing from project YAML config and merge into current config."""
-        try:
-            with open(project_config_path, 'r', encoding='utf-8') as f:
-                project_config = yaml.safe_load(f) or {}
-        except Exception:
-            return
-
-        project_logger = project_config.get('project_params', {}).get('logger', {})
-        if not isinstance(project_logger, dict):
-            return
-
-        root_level = project_logger.get('level')
-        if root_level and isinstance(root_level, str):
-            self.config.setdefault('loggers', {}).setdefault('root', {})['level'] = root_level.upper()
-
-        def _build_section(prefix: str, node: Any):
-            if not isinstance(node, dict):
-                return
-            if 'files' in node and isinstance(node['files'], dict):
-                logger_name = f"logger{prefix}"
-                logger_level = node.get('level', project_logger.get('level', 'INFO')).upper()
-                handlers = []
-                storage_path = node.get('storage_path', 'shared/logger/logs')
-                for level_name, filename in node['files'].items():
-                    handler_name = f"{logger_name}.{level_name}"
-                    handlers.append(handler_name)
-                    self.config.setdefault('handlers', {})[handler_name] = {
-                        'class': 'logging.handlers.RotatingFileHandler',
-                        'filename': str(Path(storage_path) / filename),
-                        'maxBytes': node.get('max_size_mb', 10485760) * 1024 * 1024 if node.get('max_size_mb') else 10485760,
-                        'backupCount': node.get('backup_count', 3),
-                        'formatter': 'default',
-                        'level': level_name.upper(),
-                    }
-                self.config.setdefault('loggers', {})[logger_name] = {
-                    'level': logger_level,
-                    'handlers': handlers,
-                    'propagate': False,
-                }
-                return
-            for key, value in node.items():
-                _build_section(f".{key}", value)
-
-        for section_name in ['ingestion_log', 'storage_log', 'processing_log', 'governance_log']:
-            section = project_logger.get(section_name)
-            _build_section(f".{section_name}", section)
-
-        self._ensure_handler_dirs()
-        logging.config.dictConfig(self.config)
-
     def get_logger(self, module_name: str) -> logging.Logger:
         """
         Lấy logger cho module cụ thể. Backward-compatible.
