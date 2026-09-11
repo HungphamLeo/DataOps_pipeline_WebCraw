@@ -22,7 +22,7 @@ from typing import Any, Dict, Optional
 
 from platforms.factory.client_factory import build_dbt_runner
 
-from flows.shared.context import ExecutionContext
+from flows.common.context import ExecutionContext
 from flows.cophieu68_deploy_full_pipeline.pipeline_config import Cophieu68PipelineConfig
 
 

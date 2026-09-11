@@ -31,7 +31,7 @@ from platforms.processing.base_processing_subsystem import (
 )
 from platforms.factory.client_factory import build_polars_engine
 
-from flows.shared.context import ExecutionContext, make_batch_id
+from flows.common.context import ExecutionContext, make_batch_id
 from flows.cophieu68_deploy_full_pipeline.pipeline_config import Cophieu68PipelineConfig
 from flows.cophieu68_deploy_full_pipeline.builders import (
     build_extractor,

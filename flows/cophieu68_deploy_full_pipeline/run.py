@@ -16,8 +16,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from flows.shared.base_orchestrator import BasePipelineOrchestrator, format_pipeline_result
-from flows.shared.base_executor import BaseExecutor
+from flows.common.base_orchestrator import BasePipelineOrchestrator, format_pipeline_result
+from flows.common.base_executor import BaseExecutor
 from flows.cophieu68_deploy_full_pipeline.pipeline_config import Cophieu68PipelineConfig
 
 

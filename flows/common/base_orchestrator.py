@@ -22,8 +22,8 @@ import logging
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Type
 
-from flows.shared.base_config import BasePipelineConfig
-from flows.shared.base_executor import BaseExecutor
+from flows.common.base_config import BasePipelineConfig
+from flows.common.base_executor import BaseExecutor
 
 
 class BasePipelineOrchestrator:
@@ -82,7 +82,7 @@ class BasePipelineOrchestrator:
         environment : "dev" | "prod"
         dry_run     : Nếu True, chỉ validate config, không chạy thật.
         """
-        from flows.shared.context import (
+        from flows.common.context import (
             ExecutionContext, ExecutionPhase, ProcessingBackend, make_run_id
         )
         from platforms.processing.base_processing_subsystem import ErrorEventLog, ErrorLevel
@@ -197,7 +197,7 @@ class BasePipelineOrchestrator:
         return self._validate_config(context)
 
     def _dispatch(self, context: Any) -> Dict[str, Any]:
-        from flows.shared.context import ExecutionPhase
+        from flows.common.context import ExecutionPhase
 
         phases = (
             self._phase_order()

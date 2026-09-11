@@ -16,7 +16,7 @@ không bị break ngay. Các file đó sẽ dần cập nhật import trực ti�
 from __future__ import annotations
 
 # Re-export shared context primitives (không thay đổi interface)
-from flows.shared.context import (
+from flows.common.context import (
     ExecutionPhase,
     ProcessingBackend,
     ExecutionContext,

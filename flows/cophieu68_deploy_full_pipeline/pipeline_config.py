@@ -21,7 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from flows.shared.base_config import BasePipelineConfig
+from flows.common.base_config import BasePipelineConfig
 
 
 # ---------------------------------------------------------------------------

@@ -17,16 +17,16 @@ Public API:
         format_pipeline_result,
     )
 """
-from flows.shared.context import (
+from flows.common.context import (
     ExecutionContext,
     ExecutionPhase,
     ProcessingBackend,
     make_run_id,
     make_batch_id,
 )
-from flows.shared.base_config import BasePipelineConfig
-from flows.shared.base_executor import BaseExecutor
-from flows.shared.base_orchestrator import BasePipelineOrchestrator, format_pipeline_result
+from flows.common.base_config import BasePipelineConfig
+from flows.common.base_executor import BaseExecutor
+from flows.common.base_orchestrator import BasePipelineOrchestrator, format_pipeline_result
 
 __all__ = [
     # context primitives
