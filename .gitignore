@@ -1,4 +1,5 @@
 _all_skills/
+dataops_webcraw_env/
 *.yaml
 *.json
 *.sh
@@ -10,5 +11,5 @@ _all_skills/
 *.png
 *.txt
 *.ipynb
-*.md
+
 __pycache__/
