@@ -1,0 +1,20 @@
+{"time":"2026-09-12T23:27:16", "level":"INFO", "logger":"logger.dbt", "message":"Executing dbt command: dbt run --project-dir /home/hungpham/DataOps_pipeline_WebCraw/dbt_project --select silver", "caller":"/home/hungpham/DataOps_pipeline_WebCraw/platforms/processing/dbt/base_dbt.py:78", "run_id":"N/A"}
+{"time":"2026-09-12T23:27:24", "level":"ERROR", "logger":"logger.dbt", "message":"dbt command failed with returncode 2 in 7.37s.
+Stderr: Usage: dbt run [OPTIONS]
+Try 'dbt run -h' for help.
+
+Error: Invalid value for '--project-dir': Path '/home/hungpham/DataOps_pipeline_WebCraw/dbt_project' does not exist.
+", "caller":"/home/hungpham/DataOps_pipeline_WebCraw/platforms/processing/dbt/base_dbt.py:93", "run_id":"N/A"}
+{"time":"2026-09-12T23:27:24", "level":"INFO", "logger":"logger.dbt", "message":"[Gold] Running dbt models select=gold env=prod", "caller":"/home/hungpham/DataOps_pipeline_WebCraw/flows/cophieu68_deploy_full_pipeline/gold.py:50", "run_id":"N/A"}
+{"time":"2026-09-12T23:27:24", "level":"INFO", "logger":"logger.dbt", "message":"Executing dbt command: dbt run --project-dir /home/hungpham/DataOps_pipeline_WebCraw/dbt_project --select gold", "caller":"/home/hungpham/DataOps_pipeline_WebCraw/platforms/processing/dbt/base_dbt.py:78", "run_id":"N/A"}
+{"time":"2026-09-12T23:27:31", "level":"ERROR", "logger":"logger.dbt", "message":"dbt command failed with returncode 2 in 6.97s.
+Stderr: Usage: dbt run [OPTIONS]
+Try 'dbt run -h' for help.
+
+Error: Invalid value for '--project-dir': Path '/home/hungpham/DataOps_pipeline_WebCraw/dbt_project' does not exist.
+", "caller":"/home/hungpham/DataOps_pipeline_WebCraw/platforms/processing/dbt/base_dbt.py:93", "run_id":"N/A"}
+{"time":"2026-09-12T23:27:31", "level":"ERROR", "logger":"logger.dbt", "message":"[Gold] dbt run FAILED (rc=2): Usage: dbt run [OPTIONS]
+Try 'dbt run -h' for help.
+
+Error: Invalid value for '--project-dir': Path '/home/hungpham/DataOps_pipeline_WebCraw/dbt_project' does not exist.
+", "caller":"/home/hungpham/DataOps_pipeline_WebCraw/flows/cophieu68_deploy_full_pipeline/gold.py:60", "run_id":"N/A"}

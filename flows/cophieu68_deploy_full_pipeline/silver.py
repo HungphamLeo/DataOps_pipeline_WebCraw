@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 
 from platforms.factory.client_factory import build_polars_engine, build_dbt_runner
 
+from flows.common.base_executor import BaseExecutor
 from flows.common.context import ExecutionContext
 from flows.cophieu68_deploy_full_pipeline.pipeline_config import Cophieu68PipelineConfig
 
@@ -352,7 +353,7 @@ class SilverProcessor:
 # SilverExecutor — orchestrate silver phase
 # ---------------------------------------------------------------------------
 
-class SilverExecutor:
+class SilverExecutor(BaseExecutor):
     """
     Orchestrate Silver phase: bronze → silver.
 

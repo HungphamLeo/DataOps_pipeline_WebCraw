@@ -22,6 +22,7 @@ from typing import Any, Dict, Optional
 
 from platforms.factory.client_factory import build_dbt_runner
 
+from flows.common.base_executor import BaseExecutor
 from flows.common.context import ExecutionContext
 from flows.cophieu68_deploy_full_pipeline.pipeline_config import Cophieu68PipelineConfig
 
@@ -78,7 +79,7 @@ class GoldProcessor:
         return result
 
 
-class GoldExecutor:
+class GoldExecutor(BaseExecutor):
     """Orchestrate Gold phase cho pipeline cophieu68."""
 
     def __init__(

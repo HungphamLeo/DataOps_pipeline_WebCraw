@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 
 from platforms.factory.client_factory import build_polars_engine, build_pg_writer
 
+from flows.common.base_executor import BaseExecutor
 from flows.common.context import ExecutionContext
 from flows.cophieu68_deploy_full_pipeline.pipeline_config import Cophieu68PipelineConfig
 from flows.cophieu68_deploy_full_pipeline.schema import (
@@ -416,7 +417,7 @@ class ServingProcessor:
 # ServingExecutor — orchestrate silver → PG
 # ---------------------------------------------------------------------------
 
-class ServingExecutor:
+class ServingExecutor(BaseExecutor):
     """
     Chạy toàn bộ Silver→PostgreSQL sync cho pipeline cophieu68.
     Dùng ServingProcessor + PostgreSQLWriter từ platforms.

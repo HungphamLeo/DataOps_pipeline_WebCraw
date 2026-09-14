@@ -31,6 +31,7 @@ from platforms.processing.base_processing_subsystem import (
 )
 from platforms.factory.client_factory import build_polars_engine
 
+from flows.common.base_executor import BaseExecutor
 from flows.common.context import ExecutionContext, make_batch_id
 from flows.cophieu68_deploy_full_pipeline.pipeline_config import Cophieu68PipelineConfig
 from flows.cophieu68_deploy_full_pipeline.builders import (
@@ -260,7 +261,7 @@ class BronzeIngester:
 # BronzeExecutor — orchestrate all crawl → ingest steps
 # ─────────────────────────────────────────────────────────────────────────────
 
-class BronzeExecutor:
+class BronzeExecutor(BaseExecutor):
     """
     Orchestrates full Bronze ingestion: crawl all cophieu68 endpoints
     → flatten → DQ → write Parquet to MinIO.

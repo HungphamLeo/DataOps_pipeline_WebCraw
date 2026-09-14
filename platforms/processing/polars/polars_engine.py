@@ -33,31 +33,61 @@ class PolarsEngine:
             except Exception:
                 pass
 
+    def _build_pyarrow_s3_filesystem(self):
+        """Build a PyArrow S3 filesystem for MinIO/S3 writes when endpoint creds exist."""
+        if not self.config.storage_options:
+            return None
+
+        endpoint = self.config.storage_options.get("endpoint_url")
+        if not endpoint:
+            return None
+
+        try:
+            import pyarrow.fs as pafs
+        except Exception:
+            return None
+
+        access_key = self.config.storage_options.get("aws_access_key_id")
+        secret_key = self.config.storage_options.get("aws_secret_access_key")
+        endpoint_host = endpoint.replace("http://", "").replace("https://", "")
+        scheme = "https" if endpoint.startswith("https://") else "http"
+
+        try:
+            return pafs.S3FileSystem(
+                endpoint_override=endpoint_host,
+                access_key=access_key,
+                secret_key=secret_key,
+                region="us-east-1",
+                scheme=scheme,
+                anonymous=False,
+            )
+        except Exception as exc:
+            self.logger.warning("[Polars] Unable to build S3 filesystem: %s", exc)
+            return None
+
     def write_parquet(
         self,
         df: Any,
         target_path: str,
         partition_by: Optional[List[str]] = None,
     ) -> str:
-        """Write Polars DataFrame as Parquet to local path or S3."""
-        import polars as pl
+        """Write Polars DataFrame as Parquet to local path or S3. This method is compatible with Polars 1.12.x."""
+
+        pyarrow_options = {}
+        filesystem = self._build_pyarrow_s3_filesystem()
+        if filesystem is not None:
+            pyarrow_options["filesystem"] = filesystem
+
+        kwargs: Dict[str, Any] = {
+            "use_pyarrow": True,
+            "pyarrow_options": pyarrow_options or None,
+        }
 
         if partition_by:
-            df.write_parquet(
-                target_path,
-                use_pyarrow=True,
-                pyarrow_options={
-                    "partition_cols": partition_by,
-                    "existing_data_behavior": "overwrite_or_ignore",
-                },
-                storage_options=self.config.storage_options or None,
-            )
-        else:
-            df.write_parquet(
-                target_path,
-                use_pyarrow=True,
-                storage_options=self.config.storage_options or None,
-            )
+            kwargs["partition_by"] = partition_by
+            # Polars 1.12.x accepts partition_by in the public API; we do not pass storage_options.
+
+        df.write_parquet(target_path, **kwargs)
         self.logger.debug("[Polars] Wrote %d rows → %s", len(df), target_path)
         return target_path
 
