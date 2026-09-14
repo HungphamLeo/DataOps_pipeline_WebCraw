@@ -139,7 +139,7 @@ class BasePipelineConfig:
 
     @property
     def lakehouse_base(self) -> str:
-        return os.getenv("LAKEHOUSE_BASE_PATH", "s3://lakehouse")
+        return os.getenv("LAKEHOUSE_BASE_PATH", "s3://dataops-lake")
 
     @property
     def storage_options(self) -> Dict[str, str]:
