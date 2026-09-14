@@ -160,15 +160,18 @@ class BasePipelineConfig:
 
     @property
     def pg_database(self) -> str:
-        return os.getenv("POSTGRES_DB", "etl_project")
+        # Default khớp với POSTGRES_DB trong infra/docker_compose.yml
+        return os.getenv("POSTGRES_DB", "dataops_webcraw")
 
     @property
     def pg_user(self) -> str:
-        return os.getenv("POSTGRES_USER", "")
+        # Default khớp với POSTGRES_USER trong infra/docker_compose.yml
+        return os.getenv("POSTGRES_USER", "postgres@user")
 
     @property
     def pg_password(self) -> str:
-        return os.getenv("POSTGRES_PASSWORD", "")
+        # Default khớp với POSTGRES_PASSWORD trong infra/docker_compose.yml
+        return os.getenv("POSTGRES_PASSWORD", "password@123")
 
     @property
     def pg_conn_params(self) -> Dict[str, Any]:

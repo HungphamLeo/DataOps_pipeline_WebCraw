@@ -29,13 +29,13 @@ from flows.shared.base_config import BasePipelineConfig
 # ---------------------------------------------------------------------------
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# Config YAML nằm cùng package với ingestion config
+# Đường dẫn thực tế: flows/cophieu68_deploy_full_pipeline/ingestion/config/cophieu68_config.yml
 _DEFAULT_CONFIG_PATH = (
-    _PROJECT_ROOT
-    / "platforms"
-    / "orchestration"
-    / "prefect"
+    Path(__file__).resolve().parent
+    / "ingestion"
     / "config"
-    / "cophieu68_config.yaml"
+    / "cophieu68_config.yml"
 )
 
 
@@ -88,9 +88,12 @@ class Cophieu68PipelineConfig(BasePipelineConfig):
     def dbt_build_params(self) -> Dict[str, Any]:
         """Kwargs truyền thẳng vào build_dbt_runner(...)."""
         p = self.get("dbt", {})
+        project_dir = Path(p["project_dir"]) if p.get("project_dir") else _PROJECT_ROOT / "dbt_project"
+        # profiles.yml nằm cùng thư mục với dbt_project.yml
+        profiles_dir = Path(p["profiles_dir"]) if p.get("profiles_dir") else project_dir
         return {
-            "project_dir":  p.get("project_dir", _PROJECT_ROOT / "dbt_project"),
-            "profiles_dir": p.get("profiles_dir"),
+            "project_dir":  project_dir,
+            "profiles_dir": profiles_dir,
             "target":       p.get("target"),
             "vars_dict":    p.get("vars", {}),
             "threads":      p.get("threads"),

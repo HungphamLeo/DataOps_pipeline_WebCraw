@@ -5,10 +5,10 @@ _all_skills/
 .env
 *.log
 *.pyc
-*.csv
+# *.csv
 *.yml
-*.png
+# *.png
 *.txt
-*.ipynb
-*.md
+# *.ipynb
+# *.md
 __pycache__/

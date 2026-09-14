@@ -302,8 +302,15 @@ class BronzeExecutor:
         if not data or not data.get("records"):
             self.logger.warning("[Bronze] No trading records for %s", sym)
             return
+        # Inject symbol vào từng record trước DQ check.
+        # TradingRecord dataclass không có field symbol — phải gán ở đây
+        # để cleansing rule symbol_not_null không báo false positive.
+        raw_records = data["records"]
+        sym_upper = sym.upper()
+        for rec in raw_records:
+            rec.setdefault("symbol", sym_upper)
         r = ing.process(
-            raw_records=data["records"], batch_id=bid,
+            raw_records=raw_records, batch_id=bid,
             run_id=self.context.run_id, symbol=sym,
             cleansing=build_cleansing_rules(sym),
         )
