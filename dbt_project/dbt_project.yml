@@ -1,0 +1,29 @@
+name: 'dataops_webcraw'
+version: '1.0.0'
+config-version: 2
+
+# Trỏ tới profiles.yml nằm cùng thư mục (--profiles-dir được truyền từ DbtRunner)
+profile: 'dataops_webcraw'
+
+# Thư mục chứa models
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Model config theo layer
+models:
+  dataops_webcraw:
+    silver:
+      +materialized: table
+      +schema: silver
+    gold:
+      +materialized: table
+      +schema: gold

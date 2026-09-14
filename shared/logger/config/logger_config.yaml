@@ -1,0 +1,238 @@
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  default:
+    format: '{"time":"%(asctime)s", "level":"%(levelname)s", "logger":"%(name)s", "message":"%(message)s", "caller":"%(pathname)s:%(lineno)d", "run_id":"%(run_id)s"}'
+    datefmt: "%Y-%m-%dT%H:%M:%S"
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    formatter: default
+    level: INFO
+
+  # ── Pipeline Topics: TimedRotatingFileHandler (daily rotate, keep 30 days) ──
+  ingestion_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/ingestion/ingestion.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: default
+    level: DEBUG
+
+  bronze_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/bronze/bronze.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: default
+    level: DEBUG
+
+  silver_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/silver/silver.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: default
+    level: DEBUG
+
+  gold_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/gold/gold.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: default
+    level: DEBUG
+
+  serving_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/serving/serving.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: default
+    level: DEBUG
+
+  dbt_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/dbt/dbt.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: default
+    level: DEBUG
+
+  data_quality_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/data_quality/data_quality.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: default
+    level: DEBUG
+
+  prefect_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/prefect/prefect.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: default
+    level: DEBUG
+
+  # ── ETL / Orchestration layer ──
+  etl_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/etl/etl.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: default
+    level: DEBUG
+
+  # ── Platform internals (polars, pg, minio, crawler, ...) ──
+  platform_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/platform/platform.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: default
+    level: DEBUG
+
+
+loggers:
+  # ── logger.* (prefect flow layer — dùng logger.xxx prefix) ──
+  logger.ingestion:
+    level: DEBUG
+    handlers: [console, ingestion_file]
+    propagate: false
+
+  logger.bronze:
+    level: DEBUG
+    handlers: [console, bronze_file]
+    propagate: false
+
+  logger.silver:
+    level: DEBUG
+    handlers: [console, silver_file]
+    propagate: false
+
+  logger.gold:
+    level: DEBUG
+    handlers: [console, gold_file]
+    propagate: false
+
+  logger.serving:
+    level: DEBUG
+    handlers: [console, serving_file]
+    propagate: false
+
+  logger.dbt:
+    level: DEBUG
+    handlers: [console, dbt_file]
+    propagate: false
+
+  logger.data_quality:
+    level: DEBUG
+    handlers: [console, data_quality_file]
+    propagate: false
+
+  logger.governance.data_quality:
+    level: DEBUG
+    handlers: [console, data_quality_file]
+    propagate: false
+
+  logger.prefect:
+    level: DEBUG
+    handlers: [console, prefect_file]
+    propagate: false
+
+  # ── etl.* (orchestrator / executor / config / engine layer) ──
+  # Tên được tạo bởi get_logger() khi không có prefix "logger."
+  # Ví dụ: get_logger("orchestrator_cophieu68") → "etl.orchestrator_cophieu68"
+  etl.orchestrator_cophieu68:
+    level: DEBUG
+    handlers: [console, etl_file]
+    propagate: false
+
+  etl.config_cophieu68:
+    level: DEBUG
+    handlers: [console, etl_file]
+    propagate: false
+
+  etl.extractor_cophieu68:
+    level: DEBUG
+    handlers: [console, ingestion_file]
+    propagate: false
+
+  etl.polars_engine:
+    level: DEBUG
+    handlers: [console, etl_file]
+    propagate: false
+
+  etl.pg_writer:
+    level: DEBUG
+    handlers: [console, serving_file]
+    propagate: false
+
+  etl.minio_storage:
+    level: DEBUG
+    handlers: [console, etl_file]
+    propagate: false
+
+  # ── platforms.* (logging.getLogger(__name__) từ platform modules) ──
+  platforms.processing.polars.polars_engine:
+    level: DEBUG
+    handlers: [console, platform_file]
+    propagate: false
+
+  platforms.processing.dbt.base_dbt:
+    level: DEBUG
+    handlers: [console, dbt_file]
+    propagate: false
+
+  platforms.processing.base_processing_subsystem:
+    level: DEBUG
+    handlers: [console, platform_file]
+    propagate: false
+
+  platforms.ingestion.base_crawler:
+    level: DEBUG
+    handlers: [console, ingestion_file]
+    propagate: false
+
+  platforms.storage.postgre.base_postgre:
+    level: DEBUG
+    handlers: [console, serving_file]
+    propagate: false
+
+  platforms.storage.minio.minio_storage:
+    level: DEBUG
+    handlers: [console, platform_file]
+    propagate: false
+
+  # ── flows.* (logging.getLogger(__name__) từ flow modules) ──
+  flows.cophieu68_deploy_full_pipeline.serving:
+    level: DEBUG
+    handlers: [console, serving_file]
+    propagate: false
+
+root:
+  level: INFO
+  handlers: [console]
