@@ -10,7 +10,7 @@ Bạn có 2 nguồn tri thức với mức độ ưu tiên khác nhau cần ph�
     *   **Vị trí:** Thư mục `./export_task/` nằm ngay bên trong repository dự án hiện tại.
     *   **Vai trò:** Chứa các file `.md` ghi lại tiến độ, bài học, sửa lỗi và các cập nhật kiến thức mới nhất sau mỗi session làm việc của dự án này.
 *   **[Ưu tiên 2 - Tri thức lõi] Thư mục `allskill` (Global):** 
-    *   **Vị trí:** `/home/hungpham/ai_workspace_management/.ai_workspace` (Hiển thị là thư mục gốc `allskill` trong workspace).
+    *   **Vị trí:** `C:\Users\Admin\.ai_workspace\allskill` (Hiển thị là thư mục gốc `allskill` trong workspace).
     *   **Vai trò:** Chứa các nguyên tắc lập trình, chuẩn mực code cố định và dùng chung cho mọi dự án.
 
 ## 2. Bản đồ định tuyến kỹ năng cốt lõi (Core Skill Routing)
@@ -32,7 +32,7 @@ Tiến hành tương tự với các chuyên môn khác nếu có yêu cầu. N�
 ## 4. Luồng thực thi chuẩn (Execution Workflow)
 1. Dùng biến `@workspace` (nếu dùng Copilot) hoặc tool đọc file để nạp context từ `./export_task/` -> nạp tiếp context từ `allskill/`.
 2. Xác định rõ câu hỏi thuộc phạm trù kỹ năng nào: frontend, backend, data engineering, database, architecture, automation, DevOps, testing, observability, v.v.
-3. Tìm trong `/home/hungpham/ai_workspace_management/ai_workspace/allskill` các file hoặc skill có liên quan, so khớp theo key word, topic, mục tiêu, công nghệ, lỗi pattern và tên chuyên môn.
+3. Tìm trong `C:\Users\Admin\.ai_workspace\allskill` các file hoặc skill có liên quan, so khớp theo key word, topic, mục tiêu, công nghệ, lỗi pattern và tên chuyên môn.
 4. Nếu có file skill / nội dung phù hợp, ưu tiên dùng nó làm nền tảng để tư vấn hoặc quyết định.
 5. Nếu câu hỏi là một vấn đề cụ thể mà cần agent chuyên biệt, hãy tiến hành tạo hoặc chọn agent tương ứng trong `.github/agents/` hoặc dựa trên khối kỹ năng tìm thấy để tách task rõ ràng.
 6. Áp dụng chuẩn và sinh code ngay lập tức. Không cần giải thích dài dòng về việc bạn đã đọc được file nào trừ khi người dùng yêu cầu đối chiếu.
@@ -41,7 +41,7 @@ Tiến hành tương tự với các chuyên môn khác nếu có yêu cầu. N�
 Khi người dùng hỏi về một vấn đề liên quan đến 1 skill bất kỳ hoặc một nội dung cụ thể, bạn BẮT BUỘC phải làm theo quy trình sau:
 
 1. **Phân loại phạm vi:** Xác định câu hỏi thuộc nhóm nào: frontend, backend, data pipeline, database, architecture, orchestration, data quality, security, DevOps, testing, performance, AI/ML, v.v.
-2. **Khớp từ khoá (Keyword Match):** Dò trong `/home/hungpham/ai_workspace_management/ai_workspace/allskill` để tìm các file hoặc skill có từ khóa tương đồng với câu hỏi: công nghệ, thành phần, lỗi, mục tiêu, pattern, tiêu chuẩn, kỹ thuật liên quan.
+2. **Khớp từ khoá (Keyword Match):** Dò trong `C:\Users\Admin\.ai_workspace\allskill` để tìm các file hoặc skill có từ khóa tương đồng với câu hỏi: công nghệ, thành phần, lỗi, mục tiêu, pattern, tiêu chuẩn, kỹ thuật liên quan.
 3. **Đánh giá độ phù hợp:** Nếu có nhiều skill liên quan, chọn file có độ khớp cao nhất theo business context, stack thực tế và domain của dự án hiện tại.
 4. **Tạo agent khi cần:** Nếu vấn đề có tính chuyên biệt, cần workflow riêng hoặc cần tách trách nhiệm, hãy tạo agent mới trong `.github/agents/` có tên và mô tả phù hợp với vấn đề đó.
 5. **Tư vấn theo góc nhìn senior:** Sau khi có nền tảng kỹ năng, đưa ra giải pháp không chỉ là “mã” mà còn là rationale, trade-off, risk, testing, operational impact và các bước cải thiện lâu dài như 1 senior 10 năm kinh nghiệm.

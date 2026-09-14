@@ -1,3 +1,4 @@
+
 # Session Report: Agent Training & Skill Sync
 **Date:** 2026-09-13  
 **Role:** Full Stack Data Platform Engineer  
@@ -71,3 +72,4 @@ Nội dung đã được bổ sung:
 ## 7. Gợi ý tiếp theo
 - Nếu cần agent chuyên biệt khác cho một domain cụ thể (dbt, orchestration, docker, data quality), nên bổ sung thêm file agent mới trong `.github/agents/` theo cấu trúc tương tự.
 - Mỗi khi có task phức tạp, nên cập nhật thêm 1 file summary mới trong `export_task/` để giữ knowledge base luôn mới.
+

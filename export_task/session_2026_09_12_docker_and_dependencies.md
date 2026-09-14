@@ -1,3 +1,4 @@
+
 # Session Report: Dockerization & Dependency Resolution
 **Date:** 2026-09-12  
 **Role:** Full Stack Data Platform Engineer  
@@ -94,3 +95,4 @@ python -m cli.main cophieu68 full --backend polars --env prod
 1. **WSL2 Volume Mount:** Hạn chế mount trực tiếp các file cấu hình đơn lẻ chưa khởi tạo sẵn từ WSL2 vào Container. Giải pháp dùng thuộc tính `env_file` của Compose luôn an toàn và ít lỗi runtime hơn.
 2. **Version Lock:** Luôn kiểm tra tính tương thích ngược của các thư viện bổ trợ khi dùng các Orchestrator lớn như Prefect (ví dụ: Prefect 2.x có giới hạn rất chặt chẽ về phiên bản của `pendulum`, `pytz` và `marshmallow`).
 3. **Compose Pathing:** Đặt `context: ..` trong compose nằm ở thư mục con để định vị đúng root dự án khi build image.
+
