@@ -109,10 +109,6 @@ class PrefectETLPipelineConfig:
         return self._get_logger("logger.serving")
 
     @property
-    def dbt_logger(self) -> logging.Logger:
-        return self._get_logger("logger.dbt")
-
-    @property
     def data_quality_logger(self) -> logging.Logger:
         return self._get_logger("logger.data_quality")
 

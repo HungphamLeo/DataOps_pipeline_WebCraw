@@ -444,7 +444,7 @@ BRONZE_INDUSTRY_INFO_FUND = TableDef(
 # ===========================================================================
 # ══════════════════════════  SILVER TABLES  ═════════════════════════════════
 # Silver = typed + deduplicated Parquet trên MinIO
-# Tương ứng với dbt models trong dbt_project/models/silver/
+# Silver tables are materialized directly by the Polars transforms.
 # ===========================================================================
 
 SILVER_FACT_STOCK_PRICE = TableDef(

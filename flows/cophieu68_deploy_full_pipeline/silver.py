@@ -1,17 +1,15 @@
 """
 silver.py — Silver Phase Module
 ================================
-Bronze Parquet (MinIO) → dbt transform → Silver Parquet (MinIO).
+Bronze Parquet (MinIO) → Polars transform → Silver Parquet (MinIO).
 
 Luồng:
   1. PolarsEngine.read_parquet()  đọc bronze/**/*.parquet từ S3
-  2. DbtRunner.run()              chạy dbt models bronze → silver
-     (SQL models nằm trong dbt_project/models/silver/)
+  2. Polars transform             deduplicate, type-cast, tạo surrogate keys
   3. PolarsEngine.write_parquet() ghi silver/**/*.parquet lên S3
 
 Dùng:
   - platforms/processing/polars/  → đọc/ghi Parquet S3
-  - platforms/processing/dbt/     → chạy dbt transform models
 
 Không chứa:
   - DuckDB engine (đã bỏ — PolarsEngine đọc S3 Parquet trực tiếp)
@@ -24,7 +22,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from platforms.factory.client_factory import build_polars_engine, build_dbt_runner
+from platforms.factory.client_factory import build_polars_engine
 
 from flows.common.base_executor import BaseExecutor
 from flows.common.context import ExecutionContext
@@ -41,11 +39,9 @@ class SilverProcessor:
     def __init__(
         self,
         polars_engine,
-        dbt_runner,
         base_path: str = "s3://lakehouse",
     ) -> None:
         self.polars     = polars_engine
-        self.dbt        = dbt_runner
         self.base        = base_path
         self.logger     = polars_engine.logger
 
@@ -143,34 +139,7 @@ class SilverProcessor:
         return df.with_columns(pl.col(col).cast(dtype, strict=False).alias(col))
 
     # ------------------------------------------------------------------
-    # dbt-based batch transform (recommended path)
-    # ------------------------------------------------------------------
-
-    def run_dbt_silver_models(
-        self,
-        run_id: str,
-        select: Optional[str] = "silver",
-    ) -> Dict[str, Any]:
-        """
-        Chạy tất cả dbt silver models trong một lần.
-        dbt xử lý dedup + type-cast + surrogate keys qua SQL.
-        Select pattern: 'silver' = tất cả models trong folder models/silver/.
-        """
-        self.logger.info("[Silver] Running dbt models select=%s", select)
-        result = self.dbt.run(select=select)
-        if result.success:
-            self.logger.info("[Silver] dbt silver models completed in %.1fs", result.elapsed_seconds)
-        else:
-            self.logger.error("[Silver] dbt silver models FAILED: %s", result.stderr[:500])
-        return {
-            "dbt_returncode": result.returncode,
-            "success": result.success,
-            "elapsed_seconds": result.elapsed_seconds,
-            "stdout": result.stdout[-2000:] if result.stdout else "",
-        }
-
-    # ------------------------------------------------------------------
-    # Per-table Polars fallback transforms (khi chưa có dbt models)
+    # Per-table Polars transforms
     # ------------------------------------------------------------------
 
     def transform_stock_prices(self, target_date: str, run_id: str) -> Dict[str, Any]:
@@ -357,10 +326,7 @@ class SilverExecutor(BaseExecutor):
     """
     Orchestrate Silver phase: bronze → silver.
 
-    Strategy:
-      1. Thử chạy dbt silver models (batch, hiệu quả hơn).
-      2. Nếu dbt không available (DbtConfig chưa set), fallback
-         sang per-table Polars transforms.
+    Silver được materialize trực tiếp bằng các transform Polars theo từng bảng.
     """
 
     def __init__(
@@ -383,25 +349,9 @@ class SilverExecutor(BaseExecutor):
         }
 
         polars_engine = build_polars_engine(**self.config.polars_build_params)
-        dbt_runner    = build_dbt_runner(**self.config.dbt_build_params)
         proc = SilverProcessor(
             polars_engine=polars_engine,
-            dbt_runner=dbt_runner,
             base_path=self.config.lakehouse_base,
-        )
-
-        # ── Strategy 1: dbt batch ────────────────────────────────────────
-        dbt_result = proc.run_dbt_silver_models(run_id=self.context.run_id)
-        if dbt_result["success"]:
-            result["dbt"] = dbt_result
-            result["rows_out"] = -1  # dbt không trả về row count
-            self.logger.info("[SilverExecutor] dbt silver models SUCCESS")
-            return result
-
-        # ── Strategy 2: Polars per-table fallback ────────────────────────
-        self.logger.warning(
-            "[SilverExecutor] dbt failed (rc=%d) — falling back to Polars transforms",
-            dbt_result["dbt_returncode"],
         )
 
         transforms = [

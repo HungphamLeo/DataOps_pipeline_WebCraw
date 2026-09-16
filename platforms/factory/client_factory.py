@@ -9,7 +9,7 @@ Trách nhiệm (SRP):
   Không chứa bất kỳ business logic hay pipeline-specific config nào.
 
 Tại sao đặt ở platforms/ không phải flows/shared/:
-  Các clients này (Polars, dbt, PostgreSQL, MinIO) là infrastructure concerns.
+  Các clients này (Polars, PostgreSQL, MinIO) là infrastructure concerns.
   Chúng không phụ thuộc vào domain pipeline nào. flows/ chỉ consume, không own.
 
 Usage:
@@ -21,7 +21,6 @@ Usage:
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 
@@ -57,44 +56,6 @@ def build_polars_engine(
         config=cfg,
         logger=logger or logger_manager.get_logger("polars_engine"),
     )
-
-
-# ---------------------------------------------------------------------------
-# DbtRunner — chạy dbt CLI (silver transform + gold mart models)
-# ---------------------------------------------------------------------------
-
-def build_dbt_runner(
-    project_dir: "str | Path | None" = None,
-    profiles_dir: "str | Path | None" = None,
-    target: Optional[str] = None,
-    vars_dict: Optional[Dict[str, Any]] = None,
-    threads: Optional[int] = None,
-):
-    """
-    Khởi tạo DbtRunner.
-
-    Parameters
-    ----------
-    project_dir  : Path đến dbt project. Mặc định <repo_root>/dbt_project.
-    profiles_dir : Path đến profiles.yml. None = dbt dùng ~/.dbt/profiles.yml.
-    target       : dbt target environment (dev / prod).
-    vars_dict    : Dict variables truyền vào dbt (--vars).
-    threads      : Override số threads (--threads).
-    """
-    from platforms.processing.dbt.base_dbt import DbtConfig, DbtRunner
-
-    if project_dir is None:
-        # Default: <repo_root>/dbt_project
-        project_dir = Path(__file__).parents[2] / "dbt_project"
-
-    cfg = DbtConfig(
-        project_dir=project_dir,
-        profiles_dir=profiles_dir,
-        target=target,
-        vars_dict=vars_dict or {},
-        threads=threads,
-    )
-    return DbtRunner(config=cfg)
 
 
 # ---------------------------------------------------------------------------

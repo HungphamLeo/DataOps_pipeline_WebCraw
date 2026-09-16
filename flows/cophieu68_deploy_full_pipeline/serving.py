@@ -17,7 +17,7 @@ Dùng:
 
 Không chứa:
   - Crawl web, Polars transforms (bronze/silver)
-  - dbt models (gold.py)
+  - business transforms (silver.py)
   - CLI (run.py)
 """
 from __future__ import annotations

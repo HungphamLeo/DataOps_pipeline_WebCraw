@@ -8,7 +8,7 @@ Subclass của BasePipelineConfig. Chứa:
   - DEFAULT_CONFIG_PATH: đường dẫn đến cophieu68_config.yaml
   - REQUIRED_YAML_SECTIONS: các section bắt buộc trong YAML
   - Validation cụ thể (base_url, sources.cophieu68)
-  - Properties lấy ra config từng subsystem (dbt, polars, http, sources)
+  - Properties lấy ra config từng subsystem (polars, http, sources)
     để truyền thẳng vào builders — không còn truy cập yaml_params tản mát
 
 Không chứa:
@@ -49,7 +49,6 @@ class Cophieu68PipelineConfig(BasePipelineConfig):
         # Truyền vào builders:
         engine  = build_polars_engine(**config.polars_build_params)
         pg      = build_pg_writer(**config.pg_conn_params)
-        dbt     = build_dbt_runner(**config.dbt_build_params)
         minio   = build_minio_backend(**config.minio_build_params)
     """
 
@@ -82,18 +81,6 @@ class Cophieu68PipelineConfig(BasePipelineConfig):
             "storage_options":  self.storage_options,
             "thread_pool_size": p.get("thread_pool_size"),
             "enable_streaming": p.get("enable_streaming", True),
-        }
-
-    @property
-    def dbt_build_params(self) -> Dict[str, Any]:
-        """Kwargs truyền thẳng vào build_dbt_runner(...)."""
-        p = self.get("dbt", {})
-        return {
-            "project_dir":  p.get("project_dir", _PROJECT_ROOT / "dbt_project"),
-            "profiles_dir": p.get("profiles_dir"),
-            "target":       p.get("target"),
-            "vars_dict":    p.get("vars", {}),
-            "threads":      p.get("threads"),
         }
 
     @property

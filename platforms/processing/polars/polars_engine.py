@@ -64,11 +64,17 @@ class PolarsEngine:
             self.logger.warning("[Polars] Could not ensure bucket '%s': %s", bucket, exc)
 
     def _build_pyarrow_s3_filesystem(self):
-        """Build a PyArrow S3 filesystem for MinIO/S3 writes when endpoint creds exist."""
-        if not self.config.storage_options:
+        """Build a PyArrow filesystem for S3-compatible storage.
+
+        PyArrow requires the endpoint without its URL scheme, whereas the
+        application configuration stores it as a URL.  For normal AWS S3
+        operation, returning ``None`` preserves PyArrow's default behaviour.
+        """
+        options = self.config.storage_options
+        if not options:
             return None
 
-        endpoint = self.config.storage_options.get("endpoint_url")
+        endpoint = options.get("endpoint_url") or options.get("endpoint")
         if not endpoint:
             return None
 
@@ -77,20 +83,27 @@ class PolarsEngine:
         except Exception:
             return None
 
-        access_key = self.config.storage_options.get("aws_access_key_id")
-        secret_key = self.config.storage_options.get("aws_secret_access_key")
-        endpoint_host = endpoint.replace("http://", "").replace("https://", "")
-        scheme = "https" if endpoint.startswith("https://") else "http"
+        endpoint = endpoint.rstrip("/")
+        scheme = "https" if endpoint.lower().startswith("https://") else "http"
+        endpoint_host = endpoint.split("://", 1)[-1]
+        access_key = options.get("aws_access_key_id") or options.get("access_key")
+        secret_key = options.get("aws_secret_access_key") or options.get("secret_key")
 
         try:
-            return pafs.S3FileSystem(
-                endpoint_override=endpoint_host,
-                access_key=access_key,
-                secret_key=secret_key,
-                region="us-east-1",
-                scheme=scheme,
-                anonymous=False,
-            )
+            filesystem_options = {
+                "endpoint_override": endpoint_host,
+                "access_key": access_key,
+                "secret_key": secret_key,
+                "region": options.get("region_name", "us-east-1"),
+                "scheme": scheme,
+                "anonymous": not bool(access_key and secret_key),
+            }
+            # S3-compatible services commonly require path-style addressing.
+            if "force_virtual_addressing" in options:
+                filesystem_options["force_virtual_addressing"] = bool(
+                    options["force_virtual_addressing"]
+                )
+            return pafs.S3FileSystem(**filesystem_options)
         except Exception as exc:
             self.logger.warning("[Polars] Unable to build S3 filesystem: %s", exc)
             return None

@@ -7,7 +7,7 @@ Chứa DUY NHẤT các factory functions có logic cophieu68-specific:
   - build_extractor()       : ExtractCophieu68 (nguồn cophieu68.com)
   - build_cleansing_rules() : Cleansing rules cho stock_prices
 
-Các infra builders (polars, dbt, pg, minio) đã chuyển lên:
+Các infra builders (polars, pg, minio) đã chuyển lên:
   → platforms/factory/client_factory.py
 
 Để tạo clients cho pipeline, dùng Cophieu68PipelineConfig làm nguồn tham số:
@@ -17,7 +17,6 @@ Các infra builders (polars, dbt, pg, minio) đã chuyển lên:
     config = Cophieu68PipelineConfig().load()
     engine = build_polars_engine(**config.polars_build_params)
     pg     = build_pg_writer(**config.pg_conn_params)
-    dbt    = build_dbt_runner(**config.dbt_build_params)
     minio  = build_minio_backend(**config.minio_build_params)
 """
 from __future__ import annotations

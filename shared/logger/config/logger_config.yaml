@@ -63,16 +63,6 @@ handlers:
     formatter: default
     level: DEBUG
 
-  dbt_file:
-    class: logging.handlers.TimedRotatingFileHandler
-    filename: logs/dbt/dbt.log
-    when: midnight
-    interval: 1
-    backupCount: 30
-    encoding: utf-8
-    formatter: default
-    level: DEBUG
-
   data_quality_file:
     class: logging.handlers.TimedRotatingFileHandler
     filename: logs/data_quality/data_quality.log
@@ -143,11 +133,6 @@ loggers:
     handlers: [console, serving_file]
     propagate: false
 
-  logger.dbt:
-    level: DEBUG
-    handlers: [console, dbt_file]
-    propagate: false
-
   logger.data_quality:
     level: DEBUG
     handlers: [console, data_quality_file]
@@ -200,11 +185,6 @@ loggers:
   platforms.processing.polars.polars_engine:
     level: DEBUG
     handlers: [console, platform_file]
-    propagate: false
-
-  platforms.processing.dbt.base_dbt:
-    level: DEBUG
-    handlers: [console, dbt_file]
     propagate: false
 
   platforms.processing.base_processing_subsystem:

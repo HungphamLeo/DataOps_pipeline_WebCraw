@@ -50,18 +50,20 @@ class Cophieu68PipelineOrchestrator(BasePipelineOrchestrator):
         """Khởi tạo tất cả Executors cho pipeline cophieu68."""
         from flows.cophieu68_deploy_full_pipeline.bronze import BronzeExecutor
         from flows.cophieu68_deploy_full_pipeline.silver import SilverExecutor
-        from flows.cophieu68_deploy_full_pipeline.gold import GoldExecutor
         from flows.cophieu68_deploy_full_pipeline.serving import ServingExecutor
 
         return {
             "bronze":  BronzeExecutor(context, config),
             "silver":  SilverExecutor(context, config),
-            "gold":    GoldExecutor(context, config),
             "serving": ServingExecutor(context, config),
         }
 
     def _default_symbols(self) -> List[str]:
         return self.config.DEFAULT_SYMBOLS
+
+    def _phase_order(self) -> List[str]:
+        """Gold là lớp PostgreSQL được materialize trong serving phase."""
+        return ["bronze", "silver", "serving"]
 
     def _validate_config(self, context: Any) -> Dict[str, Any]:
         v = self.config.validate()

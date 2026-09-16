@@ -11,7 +11,7 @@ Chứa các building blocks domain-agnostic được dùng bởi mọi flow:
   - Data profiler         (DataProfiler)
   - Cleansing rule set    (CleansingRuleSet)
 
-Không chứa: crawl logic, MinIO/PG I/O, Polars/dbt engines.
+Không chứa: crawl logic, MinIO/PG I/O, Polars engine.
 """
 from __future__ import annotations
 
