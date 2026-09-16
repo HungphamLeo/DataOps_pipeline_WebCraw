@@ -6,14 +6,6 @@ A Python-based data operations pipeline for web crawling and data processing.
 
 This project provides a comprehensive DataOps solution for web crawling, data extraction, and ETL pipeline orchestration. Built with Python and containerized using Docker, it enables scalable data collection and processing operations.
 
-## Project Structure
-
-```
-DataOps_pipeline_WebCraw/
-├── infra/          # Infrastructure and configuration files
-├── src/            # Source code for the pipeline
-└── docker/         # Docker configuration and containers
-```
 
 ## Tech Stack
 
