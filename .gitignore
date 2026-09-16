@@ -36,7 +36,8 @@ logs/**/*.log.*
 
 # =============================================================================
 # KHÔNG ignore các loại file quan trọng sau:
-# *.yaml, *.yml  -> docker_compose.yml, logger_config.yaml
+*.yaml
+*.yml
 # *.txt          -> requirements.txt
 # *.json         -> package.json, schemas, fixtures
 # *.md           -> docs, export_task reports
