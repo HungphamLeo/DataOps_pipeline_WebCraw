@@ -182,17 +182,17 @@ PROJECT_NAME=dataops_webcraw
 PROJECT_VERSION=1.0
 
 # PostgreSQL khi pipeline chạy trong Docker network
-POSTGRES_HOST=postgres-local
-POSTGRES_PORT=5432
-POSTGRES_DB=dataops_webcraw
-POSTGRES_USER=postgres@user
+POSTGRES_HOST=xxxx
+POSTGRES_PORT=xxxx
+POSTGRES_DB=xxxx
+POSTGRES_USER=xxxx
 POSTGRES_PASSWORD=<your-postgres-password>
 
 # MinIO khi pipeline chạy trong Docker network
 S3_ENDPOINT=http://minio:9000
 AWS_ACCESS_KEY_ID=<your-minio-access-key>
 AWS_SECRET_ACCESS_KEY=<your-minio-secret-key>
-LAKEHOUSE_BASE_PATH=s3://dataops-lake
+LAKEHOUSE_BASE_PATH=s3://<your name>
 
 # Prefect khi pipeline/worker chạy trong Docker network
 PREFECT_API_URL=http://prefect-server:4200/api
@@ -204,14 +204,14 @@ Giá trị mặc định của stack trong [docker_compose.yml](infra/docker_com
 ```text
 MinIO endpoint:       http://minio:9000
 MinIO console:        http://localhost:9001
-MinIO user:            minioadmin
-MinIO password:       minioadmin_secure_123@#
+MinIO user:            <<admin>>
+MinIO password:       <<pass>>
 
-PostgreSQL host:      postgres-local
-PostgreSQL port:      5432
-PostgreSQL database:  dataops_webcraw
-PostgreSQL user:      postgres@user
-PostgreSQL password:  password@123
+PostgreSQL host:      
+PostgreSQL port:      
+PostgreSQL database:  
+PostgreSQL user:      
+PostgreSQL password:  
 
 Prefect API:           http://prefect-server:4200/api
 ```
