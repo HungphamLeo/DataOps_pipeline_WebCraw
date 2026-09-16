@@ -52,7 +52,12 @@ class SilverProcessor:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _read_bronze(self, table_name: str, target_date: str) -> Optional[Any]:
+    def _read_bronze(
+        self,
+        table_name: str,
+        target_date: str,
+        allow_fallback: bool = True,
+    ) -> Optional[Any]:
         """
         Đọc bronze/<table_name>/ qua PolarsEngine (S3/MinIO).
         Ưu tiên partition exact date, fallback full scan.
@@ -62,7 +67,10 @@ class SilverProcessor:
         exact    = f"{self.base}/bronze/{table_name}/ingest_date={target_date}/*.parquet"
         fallback = f"{self.base}/bronze/{table_name}/**/*.parquet"
 
-        for path, label in [(exact, "exact"), (fallback, "fallback")]:
+        paths = [(exact, "exact")]
+        if allow_fallback:
+            paths.append((fallback, "fallback"))
+        for path, label in paths:
             try:
                 df = self.polars.read_parquet(path)
                 if not df.is_empty():
@@ -75,7 +83,13 @@ class SilverProcessor:
             except Exception as exc:
                 self.logger.debug("[Silver] read %s (%s) failed: %s", table_name, label, exc)
 
-        self.logger.warning("[Silver] bronze/%s is empty — skipping", table_name)
+        if allow_fallback:
+            self.logger.warning("[Silver] bronze/%s is empty — skipping", table_name)
+        else:
+            self.logger.warning(
+                "[Silver] bronze/%s has no partition for %s — skipping stale fallback",
+                table_name, target_date,
+            )
         return None
 
     def _cast_non_numeric(self, df: Any) -> Any:
@@ -218,9 +232,22 @@ class SilverProcessor:
         if df is None:
             return {"rows_in": 0, "rows_out": 0, "silver_path": None}
         rows_in = len(df)
-        df = self._dedup(df, keys=["symbol", "Year"], run_id=run_id, source="bronze.business_plan")
+        rename_map = {
+            source: target
+            for source, target in {
+                "Year": "year",
+                "Plan_revenue": "plan_revenue",
+                "Pass_revenue": "pass_revenue",
+                "Plan_profit": "plan_profit",
+                "Pass_profit": "pass_profit",
+            }.items()
+            if source in df.columns and target not in df.columns
+        }
+        if rename_map:
+            df = df.rename(rename_map)
+        df = self._dedup(df, keys=["symbol", "year"], run_id=run_id, source="bronze.business_plan")
         df = df.with_columns(
-            pl.concat_str([pl.col("symbol"), pl.col("Year")], separator="|")
+            pl.concat_str([pl.col("symbol"), pl.col("year")], separator="|")
             .map_elements(self.sk_gen.hash_key, return_dtype=pl.Utf8)
             .alias("plan_key")
         )
@@ -304,7 +331,11 @@ class SilverProcessor:
         import polars as pl
         dfs = []
         for kind in ("summary_info", "financial_info", "fund_info"):
-            df = self._read_bronze(f"industry_info_{kind}", target_date)
+            df = self._read_bronze(
+                f"industry_info_{kind}",
+                target_date,
+                allow_fallback=False,
+            )
             if df is not None:
                 dfs.append(df)
         if not dfs:

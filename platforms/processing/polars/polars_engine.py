@@ -8,6 +8,7 @@ Does NOT contain: domain logic, pipeline business rules.
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -114,28 +115,74 @@ class PolarsEngine:
         target_path: str,
         partition_by: Optional[List[str]] = None,
     ) -> str:
-        """Write Polars DataFrame as Parquet to local path or S3. This method is compatible with Polars 1.12.x."""
+        """Write a DataFrame to a Parquet file or partitioned dataset.
 
-        pyarrow_options = {}
-        filesystem = self._build_pyarrow_s3_filesystem()
-        if filesystem is not None:
-            pyarrow_options["filesystem"] = filesystem
-
-        kwargs: Dict[str, Any] = {
-            "use_pyarrow": True,
-            "pyarrow_options": pyarrow_options or None,
-        }
-
-        if partition_by:
-            kwargs["partition_by"] = partition_by
-            # Polars 1.12.x accepts partition_by in the public API; we do not pass storage_options.
-
+        A partitioned write targets a directory because PyArrow creates one
+        or more files below each partition.  A non-partitioned write must
+        target a regular file, so directory-style paths are converted to a
+        deterministic ``part-0.parquet`` path.
+        """
         if target_path.startswith(("s3://", "s3a://")):
             self._ensure_s3_bucket(target_path)
-            
-        df.write_parquet(target_path, **kwargs)
-        self.logger.debug("[Polars] Wrote %d rows → %s", len(df), target_path)
-        return target_path
+            filesystem = self._build_pyarrow_s3_filesystem()
+            if filesystem is None:
+                raise RuntimeError(
+                    "Cannot write S3 Parquet: PyArrow S3 filesystem could not be built"
+                )
+            self._write_with_pyarrow(
+                df=df,
+                target_path=target_path,
+                partition_by=partition_by,
+                filesystem=filesystem,
+            )
+            self.logger.debug("[Polars] Wrote %d rows → %s", len(df), target_path)
+            return target_path
+
+        write_path = target_path
+        if not partition_by:
+            write_path = self._resolve_file_path(target_path)
+        else:
+            Path(write_path).mkdir(parents=True, exist_ok=True)
+
+        df.write_parquet(write_path, partition_by=partition_by)
+        self.logger.debug("[Polars] Wrote %d rows → %s", len(df), write_path)
+        return write_path
+
+    def _write_with_pyarrow(
+        self,
+        df: Any,
+        target_path: str,
+        partition_by: Optional[List[str]],
+        filesystem: Any,
+    ) -> None:
+        """Write a local or S3 dataset without passing directories to a file writer."""
+        import pyarrow.dataset as pads
+        import pyarrow.parquet as papq
+
+        table = df.to_arrow()
+        storage_path = target_path.split("://", 1)[-1].rstrip("/")
+
+        if partition_by:
+            pads.write_dataset(
+                table,
+                base_dir=storage_path,
+                filesystem=filesystem,
+                format="parquet",
+                partitioning=partition_by,
+                basename_template=f"part-{uuid.uuid4().hex}-{{i}}.parquet",
+                existing_data_behavior="overwrite_or_ignore",
+            )
+            return
+
+        file_path = f"{storage_path}/part-0.parquet"
+        papq.write_table(table, file_path, filesystem=filesystem)
+
+    @staticmethod
+    def _resolve_file_path(target_path: str) -> str:
+        """Convert a directory-style target into a concrete Parquet file."""
+        if target_path.endswith(".parquet"):
+            return target_path
+        return f"{target_path.rstrip('/')}/part-0.parquet"
 
     def read_parquet(self, path: str) -> Any:
         """Read Parquet from local path or S3."""

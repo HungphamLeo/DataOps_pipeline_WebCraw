@@ -188,6 +188,8 @@ class TableDef:
             lines.append("    _ingested_at TEXT")
         if "_pipeline_run_id" not in existing_names:
             lines.append("    _pipeline_run_id TEXT")
+        if "_ingest_timestamp" not in existing_names:
+            lines.append("    _ingest_timestamp TEXT")
 
         body = ",\n".join(lines)
         qualified = f"{staging_schema}.{self.table_name}"
@@ -543,11 +545,11 @@ SILVER_FACT_BUSINESS_PLAN = TableDef(
     columns=[
         ColumnDef("plan_key",      "Utf8",    "TEXT",         primary_key=True),
         ColumnDef("symbol",        "Utf8",    "TEXT",         nullable=False),
-        ColumnDef("Year",          "Utf8",    "TEXT"),
-        ColumnDef("Plan_revenue",  "Float64", "NUMERIC(20,2)"),
-        ColumnDef("Pass_revenue",  "Float64", "NUMERIC(20,2)"),
-        ColumnDef("Plan_profit",   "Float64", "NUMERIC(20,2)"),
-        ColumnDef("Pass_profit",   "Float64", "NUMERIC(20,2)"),
+        ColumnDef("year",         "Utf8",    "TEXT"),
+        ColumnDef("plan_revenue", "Float64", "NUMERIC(20,2)"),
+        ColumnDef("pass_revenue", "Float64", "NUMERIC(20,2)"),
+        ColumnDef("plan_profit",  "Float64", "NUMERIC(20,2)"),
+        ColumnDef("pass_profit",  "Float64", "NUMERIC(20,2)"),
         ColumnDef("_ingested_at",  "Utf8",    "TIMESTAMPTZ"),
         ColumnDef("_pipeline_run_id", "Utf8", "TEXT"),
     ],
@@ -862,7 +864,11 @@ ALL_BRONZE_TABLES: Dict[str, TableDef] = {
     "company_profile":            BRONZE_COMPANY_PROFILE,
     "financial_ratios":           BRONZE_FINANCIAL_RATIOS,
     "income_statement":           BRONZE_INCOME_STATEMENT,
+    "income_statement_quarter":   BRONZE_INCOME_STATEMENT,
+    "income_statement_year":      BRONZE_INCOME_STATEMENT,
     "balance_sheet":              BRONZE_BALANCE_SHEET,
+    "balance_sheet_quarter":      BRONZE_BALANCE_SHEET,
+    "balance_sheet_year":         BRONZE_BALANCE_SHEET,
     "business_plan":              BRONZE_BUSINESS_PLAN,
     "industry_sectors":           BRONZE_INDUSTRY_SECTORS,
     "market_type_sectors":        BRONZE_MARKET_TYPE_SECTORS,

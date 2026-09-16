@@ -22,6 +22,9 @@ Không chứa:
 """
 from __future__ import annotations
 
+import re
+from decimal import Decimal, InvalidOperation
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from platforms.factory.client_factory import build_polars_engine, build_pg_writer
@@ -78,18 +81,52 @@ class ServingProcessor:
         for tbl_name, tbl_def in ALL_SILVER_TABLES.items():
             ddl = tbl_def.to_staging_ddl(self.STAGING)
             self.pg.execute(ddl)
+            self._ensure_table_columns(self.STAGING, tbl_def)
             self.logger.debug("[Serving] Ensured staging.%s", tbl_name)
 
         # Normalized tables (typed) — từ Gold registry
         for tbl_name, tbl_def in ALL_GOLD_TABLES.items():
             ddl = tbl_def.to_pg_ddl(self.NORMALIZED)
             self.pg.execute(ddl)
+            self._ensure_table_columns(self.NORMALIZED, tbl_def)
             self.logger.debug("[Serving] Ensured normalized.%s", tbl_name)
+
+        self.pg.execute(
+            "ALTER TABLE normalized.fact_business_plan "
+            "ALTER COLUMN revenue_completion_rate TYPE NUMERIC(10,4) "
+            "USING revenue_completion_rate::NUMERIC"
+        )
+        self.pg.execute(
+            "ALTER TABLE normalized.fact_business_plan "
+            "ALTER COLUMN profit_completion_rate TYPE NUMERIC(10,4) "
+            "USING profit_completion_rate::NUMERIC"
+        )
 
         self.logger.info(
             "[Serving] Schema bootstrap: staging=%d tables, normalized=%d tables",
             len(ALL_SILVER_TABLES), len(ALL_GOLD_TABLES),
         )
+
+    def _ensure_table_columns(self, schema: str, table_def: Any) -> None:
+        """Add registry columns to existing tables without dropping data."""
+        columns = list(table_def.columns)
+        defined_names = {column.name for column in columns}
+        if "_ingested_at" not in defined_names:
+            columns.append(("_ingested_at", "TIMESTAMPTZ"))
+        if "_pipeline_run_id" not in defined_names:
+            columns.append(("_pipeline_run_id", "TEXT"))
+        if "_ingest_timestamp" not in defined_names:
+            columns.append(("_ingest_timestamp", "TEXT"))
+
+        for column in columns:
+            if isinstance(column, tuple):
+                column_name, column_type = column
+            else:
+                column_name, column_type = column.name, column.pg_type
+            self.pg.execute(
+                f'ALTER TABLE {schema}.{table_def.table_name} '
+                f'ADD COLUMN IF NOT EXISTS "{column_name}" {column_type}'
+            )
 
     # ------------------------------------------------------------------
     # Internal: đọc Parquet từ MinIO qua PolarsEngine
@@ -110,10 +147,147 @@ class ServingProcessor:
             # Cast tất cả sang str để match staging TEXT schema
             str_exprs = [pl.col(c).cast(pl.Utf8, strict=False).alias(c) for c in df.columns]
             df = df.with_columns(str_exprs)
-            return df.to_pandas().where(lambda x: x.notna(), None).to_dict("records")
+            records = df.to_pandas().where(lambda x: x.notna(), None).to_dict("records")
+            records = self._normalize_numeric_records(silver_table, records)
+            return self._normalize_date_records(silver_table, records)
         except Exception as exc:
             self.logger.warning("[Serving] Read silver/%s failed: %s", silver_table, exc)
             return None
+
+    def _normalize_numeric_records(
+        self,
+        silver_table: str,
+        records: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Normalize source numeric formats before PostgreSQL casts.
+
+        Source pages may emit values such as ``17.9K`` or ``132,000,000``.
+        Staging remains TEXT, while values destined for numeric Gold columns
+        are converted to canonical decimal strings before the SQL load.
+        """
+        table_def = ALL_GOLD_TABLES.get(silver_table)
+        if table_def is None:
+            return records
+
+        numeric_columns = {
+            column.name
+            for column in table_def.columns
+            if column.pg_type.upper().startswith(("NUMERIC", "BIGINT", "INTEGER", "SMALLINT"))
+        }
+        normalized: List[Dict[str, Any]] = []
+        for record in records:
+            clean = dict(record)
+            for column in numeric_columns.intersection(clean):
+                clean[column] = self._normalize_numeric_value(
+                    clean[column], silver_table, column
+                )
+            normalized.append(clean)
+        return normalized
+
+    def _normalize_date_records(
+        self,
+        silver_table: str,
+        records: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Convert source date formats to ISO strings before PostgreSQL loading."""
+        table_def = ALL_GOLD_TABLES.get(silver_table)
+        if table_def is None:
+            return records
+
+        date_columns = {
+            column.name
+            for column in table_def.columns
+            if column.pg_type.upper().startswith("DATE")
+        }
+        if silver_table == "fact_stock_price":
+            date_columns.add("date")
+        normalized: List[Dict[str, Any]] = []
+        for record in records:
+            clean = dict(record)
+            for column in date_columns.intersection(clean):
+                clean[column] = self._normalize_date_value(
+                    clean[column], silver_table, column
+                )
+            normalized.append(clean)
+        return normalized
+
+    def _normalize_date_value(
+        self,
+        value: Any,
+        table: str,
+        column: str,
+    ) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if text in {"", "None", "none", "NULL", "null", "-", "--", "N/A", "n/a"}:
+            return None
+
+        for date_format in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(text, date_format).date().isoformat()
+            except ValueError:
+                continue
+
+        self.logger.warning(
+            "[Serving] Invalid date skipped: table=%s column=%s value=%r",
+            table, column, value,
+        )
+        return None
+
+    def _normalize_numeric_value(
+        self,
+        value: Any,
+        table: str,
+        column: str,
+    ) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip().replace("\u00a0", "")
+        if text in {"", "None", "none", "NULL", "null", "-", "--", "N/A", "n/a"}:
+            return None
+
+        text = text.replace(",", "").replace("%", "").strip()
+        if "#" in text:
+            parts = [part.strip() for part in text.split("#") if part.strip()]
+            if len(parts) == 2:
+                left = self._normalize_numeric_value(parts[0], table, column)
+                right = self._normalize_numeric_value(parts[1], table, column)
+                if left is not None and right is not None:
+                    return format((Decimal(left) + Decimal(right)) / 2, "f")
+            text = text.split("#", 1)[0].strip()
+
+        text = re.sub(r"[xX]$", "", text).strip()
+        suffix_multiplier = Decimal("1")
+        suffix_match = re.search(r"(MI|BI|K|M|B|T)$", text, re.IGNORECASE)
+        suffix = suffix_match.group(1).upper() if suffix_match else ""
+        if suffix:
+            suffix_multiplier = {
+                "K": Decimal("1000"),
+                "M": Decimal("1000000"),
+                "MI": Decimal("1000000"),
+                "B": Decimal("1000000000"),
+                "BI": Decimal("1000000000"),
+                "T": Decimal("1000000000000"),
+            }[suffix]
+            text = text[: -len(suffix)].strip()
+
+        if not re.fullmatch(r"[+-]?\d+(?:\.\d+)?", text):
+            self.logger.warning(
+                "[Serving] Non-numeric value skipped: table=%s column=%s value=%r",
+                table, column, value,
+            )
+            return None
+
+        try:
+            result = Decimal(text) * suffix_multiplier
+        except InvalidOperation:
+            self.logger.warning(
+                "[Serving] Invalid numeric value skipped: table=%s column=%s value=%r",
+                table, column, value,
+            )
+            return None
+        return format(result, "f")
 
     def _stg(self, name: str) -> str:
         return f"{self.STAGING}.{name}"
@@ -121,9 +295,21 @@ class ServingProcessor:
     def _norm(self, name: str) -> str:
         return f"{self.NORMALIZED}.{name}"
 
-    def _load_staging(self, table: str, records: List[Dict[str, Any]], run_id: str) -> int:
+    def _load_staging(
+        self,
+        table: str,
+        records: List[Dict[str, Any]],
+        run_id: str,
+        silver_table: str,
+    ) -> int:
         self.pg.execute(f"TRUNCATE TABLE {self._stg(table)}")
-        res = self.pg.bulk_insert(self._stg(table), records)
+        allowed = set(ALL_SILVER_TABLES[silver_table].column_names())
+        allowed.update({"_ingested_at", "_pipeline_run_id", "_ingest_timestamp"})
+        filtered = [
+            {key: value for key, value in record.items() if key in allowed}
+            for record in records
+        ]
+        res = self.pg.bulk_insert(self._stg(table), filtered)
         count = res.get("inserted_count", len(records))
         self.logger.info("[Serving] Loaded %d rows → staging.%s", count, table)
         return count
@@ -136,7 +322,7 @@ class ServingProcessor:
         records = self._read_silver("fact_stock_price")
         if not records:
             return {"rows_in": 0, "rows_out": 0, "table": "fact_stock_price"}
-        rows_in = self._load_staging("stock_prices", records, run_id)
+        rows_in = self._load_staging("fact_stock_price", records, run_id, "fact_stock_price")
         sql = f"""
         INSERT INTO {self._norm("fact_stock_price")}
             (trade_key, symbol, trade_date, close_price, open_price,
@@ -157,7 +343,7 @@ class ServingProcessor:
             EXTRACT(YEAR  FROM NULLIF("date",'None')::DATE)::SMALLINT,
             EXTRACT(MONTH FROM NULLIF("date",'None')::DATE)::SMALLINT,
             NOW(), %(run_id)s
-        FROM {self._stg("stock_prices")}
+        FROM {self._stg("fact_stock_price")}
         WHERE symbol    IS NOT NULL AND symbol    != 'None'
           AND "date"    IS NOT NULL AND "date"    != 'None'
           AND trade_key IS NOT NULL AND trade_key != 'None'
@@ -177,7 +363,7 @@ class ServingProcessor:
         records = self._read_silver("dim_company")
         if not records:
             return {"rows_in": 0, "rows_out": 0, "table": "dim_company"}
-        rows_in = self._load_staging("company_profile", records, run_id)
+        rows_in = self._load_staging("dim_company", records, run_id, "dim_company")
         sql = (
             f"INSERT INTO {self._norm('dim_company')}"
             r"""
@@ -210,7 +396,7 @@ class ServingProcessor:
             NULL::DATE, TRUE,
             NULLIF(_row_hash,'None'),
             NOW(), %(run_id)s"""
-            + f" FROM {self._stg('company_profile')}"
+            + f" FROM {self._stg('dim_company')}"
             + r"""
         WHERE symbol IS NOT NULL AND symbol != 'None'
           AND company_key IS NOT NULL AND company_key != 'None'
@@ -228,7 +414,7 @@ class ServingProcessor:
         records = self._read_silver("fact_financial_metrics")
         if not records:
             return {"rows_in": 0, "rows_out": 0, "table": "fact_financial_metrics"}
-        rows_in = self._load_staging("financial_ratios", records, run_id)
+        rows_in = self._load_staging("fact_financial_metrics", records, run_id, "fact_financial_metrics")
         sql = f"""
         INSERT INTO {self._norm("fact_financial_metrics")}
             (financial_ratio_key, symbol, reference_price, open_price,
@@ -259,7 +445,7 @@ class ServingProcessor:
             NULLIF(equity_to_assets,'None')::NUMERIC(10,4),
             NULLIF(cash,'None')::NUMERIC(20,2),
             NOW(), NOW(), %(run_id)s
-        FROM {self._stg("financial_ratios")}
+        FROM {self._stg("fact_financial_metrics")}
         WHERE symbol IS NOT NULL AND symbol != 'None'
           AND financial_ratio_key IS NOT NULL AND financial_ratio_key != 'None'
         ORDER BY financial_ratio_key, _ingest_timestamp DESC NULLS LAST
@@ -276,7 +462,7 @@ class ServingProcessor:
         records = self._read_silver("fact_business_plan")
         if not records:
             return {"rows_in": 0, "rows_out": 0, "table": "fact_business_plan"}
-        rows_in = self._load_staging("business_plan", records, run_id)
+        rows_in = self._load_staging("fact_business_plan", records, run_id, "fact_business_plan")
         sql = f"""
         INSERT INTO {self._norm("fact_business_plan")}
             (plan_key, symbol, year, plan_revenue, pass_revenue,
@@ -297,7 +483,7 @@ class ServingProcessor:
                  THEN ROUND(NULLIF(pass_profit,'None')::NUMERIC /
                             NULLIF(plan_profit,'None')::NUMERIC, 4) END,
             NOW(), NOW(), %(run_id)s
-        FROM {self._stg("business_plan")}
+        FROM {self._stg("fact_business_plan")}
         WHERE symbol IS NOT NULL AND symbol != 'None'
           AND plan_key IS NOT NULL AND plan_key != 'None'
           AND NULLIF(year,'None') IS NOT NULL
@@ -318,7 +504,7 @@ class ServingProcessor:
         records = self._read_silver("dim_industry")
         if not records:
             return {"rows_in": 0, "rows_out": 0, "table": "dim_industry"}
-        rows_in = self._load_staging("industry_sectors", records, run_id)
+        rows_in = self._load_staging("dim_industry", records, run_id, "dim_industry")
         sql = (
             f"INSERT INTO {self._norm('dim_industry')}"
             r"""
@@ -333,7 +519,7 @@ class ServingProcessor:
             NULL::DATE, TRUE,
             NULLIF(_row_hash,'None'),
             NOW(), %(run_id)s"""
-            + f" FROM {self._stg('industry_sectors')}"
+            + f" FROM {self._stg('dim_industry')}"
             + r"""
         WHERE industry_code IS NOT NULL AND industry_code != 'None'
           AND industry_sk IS NOT NULL AND industry_sk != 'None'
@@ -351,15 +537,15 @@ class ServingProcessor:
         records = self._read_silver("dim_market_type")
         if not records:
             return {"rows_in": 0, "rows_out": 0, "table": "dim_market_type"}
-        rows_in = self._load_staging("market_type_sectors", records, run_id)
+        rows_in = self._load_staging("dim_market_type", records, run_id, "dim_market_type")
         sql = f"""
         INSERT INTO {self._norm("dim_market_type")}
             (market_key, market_type, market_name, update_time, _ingested_at)
         SELECT DISTINCT ON (market_key)
             market_key,
-            NULLIF(market_type,'None'), NULLIF(market_name,'None'),
+            NULLIF(market_type_code,'None'), NULLIF(market_type_name,'None'),
             NOW(), NOW()
-        FROM {self._stg("market_type_sectors")}
+        FROM {self._stg("dim_market_type")}
         WHERE market_key IS NOT NULL AND market_key != 'None'
         ORDER BY market_key, _ingest_timestamp DESC NULLS LAST
         ON CONFLICT (market_key) DO UPDATE SET
