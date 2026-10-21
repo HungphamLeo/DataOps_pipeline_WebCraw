@@ -45,7 +45,7 @@ def build_polars_engine(
     logger           : Logger instance; nếu None tạo mới.
     """
     from platforms.processing.polars.polars_engine import PolarsConfig, PolarsEngine
-    from shared.logger.python_main_logger import logger_manager
+    from shared.logger.logger_setup import logger_manager
 
     cfg = PolarsConfig(
         storage_options=storage_options,
@@ -77,7 +77,7 @@ def build_pg_writer(
     Trả về None nếu username rỗng (credentials chưa được set).
     """
     from platforms.storage.postgre.base_postgre import PostgreSQLWriter
-    from shared.logger.python_main_logger import logger_manager
+    from shared.logger.logger_setup import logger_manager
 
     if not username:
         return None
@@ -116,7 +116,7 @@ def build_minio_backend(
     secure     : True để dùng TLS (False cho local dev).
     """
     from platforms.storage.minio.minio_storage import MinioStorageBackend
-    from shared.logger.python_main_logger import logger_manager
+    from shared.logger.logger_setup import logger_manager
 
     return MinioStorageBackend(
         endpoint=endpoint,

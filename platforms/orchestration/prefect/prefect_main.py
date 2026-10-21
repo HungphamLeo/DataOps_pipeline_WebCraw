@@ -14,7 +14,7 @@ from typing import Dict, Any, Optional
 import logging
 import yaml
 
-from shared.logger.python_main_logger import logger_manager
+from shared.logger.logger_setup import logger_manager
 
 
 class ConfigLoader(ABC):

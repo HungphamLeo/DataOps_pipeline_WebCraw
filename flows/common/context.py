@@ -32,16 +32,11 @@ from typing import Any, List, Optional
 class ExecutionPhase(str, Enum):
     BRONZE   = "bronze"
     SILVER   = "silver"
-    GOLD     = "gold"
-    SERVING  = "serving"
     FULL     = "full"
-    VALIDATE = "validate"
 
 
 class ProcessingBackend(str, Enum):
     POLARS = "polars"
-    DBT    = "dbt"
-
 
 # ---------------------------------------------------------------------------
 # ID generators

@@ -43,7 +43,7 @@ def build_extractor(config: Cophieu68PipelineConfig, logger: Optional[logging.Lo
     from flows.cophieu68_deploy_full_pipeline.ingestion.source.extract_cophieu68 import (
         ExtractCophieu68,
     )
-    from shared.logger.python_main_logger import logger_manager
+    from shared.logger.logger_setup import logger_manager
 
     return ExtractCophieu68(
         pipeline_config=config.extractor_pipeline_config,

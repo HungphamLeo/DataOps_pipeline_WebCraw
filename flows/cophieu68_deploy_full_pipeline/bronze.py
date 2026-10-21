@@ -65,79 +65,6 @@ class BronzeIngester:
         self.logger           = engine.logger
         self.governance_logger = governance_logger or engine.logger
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _profile(records: List[Dict[str, Any]]) -> Dict[str, Any]:
-        if not records:
-            return {"total_rows": 0, "columns": []}
-        cols = list(records[0].keys())
-        null_counts = {c: sum(1 for r in records if r.get(c) is None) for c in cols}
-        return {"total_rows": len(records), "columns": cols, "null_counts": null_counts}
-
-    def _apply_dq(
-        self,
-        records: List[Dict[str, Any]],
-        cleansing: CleansingRuleSet,
-        run_id: str,
-    ) -> tuple:
-        """Stamp _dq_status onto each record; return (enriched, violations)."""
-        processed, violations = [], []
-        for rec in records:
-            valid, messages = cleansing.apply(rec)
-            rec["_dq_status"] = "PASS" if valid else "WARN"
-            rec["_dq_errors"] = "; ".join(messages) if messages else ""
-            rec["_run_id"]    = run_id
-            if not valid:
-                violations.append({"record": rec, "messages": messages})
-            processed.append(rec)
-        return processed, violations
-
-    @staticmethod
-    def _flatten(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Cast every value to str (Bronze = raw strings only).
-        Handles nested DataFrames, numpy scalars, arrays.
-        """
-        import pandas as _pd
-        import numpy as _np
-
-        flat = []
-        for rec in records:
-            out: Dict[str, Any] = {}
-            for k, v in rec.items():
-                if not isinstance(k, str):
-                    continue
-                if isinstance(v, _pd.DataFrame):
-                    out[k] = v.to_json(orient="records")
-                elif v is None:
-                    out[k] = None
-                elif isinstance(v, (_np.integer, _np.floating)):
-                    out[k] = str(v.item())
-                elif isinstance(v, _np.ndarray):
-                    out[k] = str(v.tolist())
-                else:
-                    out[k] = str(v)
-            flat.append(out)
-        return flat
-
-    def _audit_cols(self, df: Any, batch_id: str, run_id: str) -> Any:
-        """Attach _batch_id, _run_id, _ingest_timestamp, ingest_date."""
-        import polars as pl
-        now = datetime.now(timezone.utc)
-        return df.with_columns([
-            pl.lit(batch_id).alias("_batch_id"),
-            pl.lit(run_id).alias("_run_id"),
-            pl.lit(now.isoformat()).alias("_ingest_timestamp"),
-            pl.lit(now.date().isoformat()).alias("ingest_date"),
-        ])
-
-    # ------------------------------------------------------------------
-    # process — trading data with explicit DQ gate + reject path
-    # ------------------------------------------------------------------
-
     def process(
         self,
         raw_records: List[Dict[str, Any]],
@@ -147,45 +74,6 @@ class BronzeIngester:
         cleansing: Optional[CleansingRuleSet] = None,
     ) -> Dict[str, Any]:
         import polars as pl
-
-        profile = self._profile(raw_records)
-
-        if cleansing:
-            enriched, violations = self._apply_dq(raw_records, cleansing, run_id)
-            if violations:
-                self.logger.warning("[Bronze:%s] %d DQ violations", symbol, len(violations))
-                for idx, v in enumerate(violations, 1):
-                    self.governance_logger.warning(
-                        "[DQ][%s] %d/%d: %s",
-                        symbol, idx, len(violations), "; ".join(v["messages"]),
-                    )
-        else:
-            enriched, violations = raw_records, []
-
-        if not enriched:
-            return {
-                "saved_path": None, "reject_path": None,
-                "stats": {**profile, "clean": 0, "dq_violations": len(violations)},
-            }
-
-        df = pl.DataFrame(enriched)
-        if "symbol" not in df.columns:
-            df = df.with_columns(pl.lit(symbol.upper()).alias("symbol"))
-        df = self._audit_cols(df, batch_id, run_id)
-
-        path = f"{self.base_path}/bronze/stock_prices/"
-        self.engine.write_parquet(df=df, target_path=path, partition_by=["ingest_date"])
-
-        reject_path = None
-        if violations:
-            reject_path = f"{self.base_path}/bronze/_dq_violations/stock_prices/"
-            reject_df = pl.DataFrame([v["record"] for v in violations])
-            self.engine.write_parquet(df=reject_df, target_path=reject_path)
-
-        return {
-            "saved_path": path, "reject_path": reject_path,
-            "stats": {**profile, "clean": len(enriched), "dq_violations": len(violations)},
-        }
 
     # ------------------------------------------------------------------
     # ingest — generic, all tables
@@ -454,7 +342,7 @@ class BronzeExecutor(BaseExecutor):
     # ------------------------------------------------------------------
 
     def execute(self) -> Dict[str, Any]:
-        from shared.logger.python_main_logger import logger_manager
+        from shared.logger.logger_setup import logger_manager
 
         self.logger.info(
             "[BronzeExecutor] Starting bronze phase symbols=%s", self.context.symbols
