@@ -7,11 +7,12 @@ Does NOT contain: domain logic, pipeline business rules.
 """
 from __future__ import annotations
 
-import logging
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from shared.logger.logger_setup import logger_manager
 
 def _extract_bucket(s3_path: str) -> Optional[str]:
     """Extract bucket name từ s3://bucket/... hoặc s3a://bucket/..."""
@@ -30,9 +31,9 @@ class PolarsConfig:
 class PolarsEngine:
     """Thin wrapper around Polars providing S3-aware read/write Parquet."""
 
-    def __init__(self, config: PolarsConfig, logger: Optional[logging.Logger] = None) -> None:
+    def __init__(self, config: PolarsConfig, logger=None) -> None:
         self.config = config
-        self.logger = logger or logging.getLogger(__name__)
+        self.logger = logger or logger_manager.get_logger(__name__)
         if config.thread_pool_size:
             try:
                 import polars as pl

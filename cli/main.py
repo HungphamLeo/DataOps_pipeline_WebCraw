@@ -111,6 +111,9 @@ def main() -> None:
     Thin entry point: parses CLI arguments and runs selected orchestrator.
     Orchestrator is responsible for resolving ExecutionPhase — CLI passes raw string.
     """
+    from shared.logger.logger_setup import setup_pipeline_logging
+    setup_pipeline_logging()
+
     parser = build_parser()
     args = parser.parse_args()
 

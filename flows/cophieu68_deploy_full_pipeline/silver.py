@@ -22,11 +22,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from platforms.factory.client_factory import build_polars_engine
+import polars as pl
 
-from flows.common.base_executor import BaseExecutor
+from platforms.factory.client_factory import build_polars_engine
+from platforms.processing.base_processing_subsystem import ErrorLevel
+
+from flows.common.base_config import BasePipelineConfig, BaseExecutor
 from flows.common.context import ExecutionContext
-from flows.cophieu68_deploy_full_pipeline.pipeline_config import Cophieu68PipelineConfig
+from shared.logger.logger_setup import logger_manager
 
 
 class SilverProcessor:
@@ -40,10 +43,11 @@ class SilverProcessor:
         self,
         polars_engine,
         base_path: str = "s3://lakehouse",
+        logger=None,
     ) -> None:
-        self.polars     = polars_engine
-        self.base        = base_path
-        self.logger     = polars_engine.logger
+        self.polars  = polars_engine
+        self.base    = base_path
+        self.logger  = logger or getattr(polars_engine, "logger", None) or logger_manager.get_logger(__name__)
 
         from platforms.processing.base_processing_subsystem import SurrogateKeyGenerator
         self.sk_gen = SurrogateKeyGenerator(prefix="STK_", key_length=32)
@@ -62,8 +66,6 @@ class SilverProcessor:
         Đọc bronze/<table_name>/ qua PolarsEngine (S3/MinIO).
         Ưu tiên partition exact date, fallback full scan.
         """
-        import polars as pl
-
         exact    = f"{self.base}/bronze/{table_name}/ingest_date={target_date}/*.parquet"
         fallback = f"{self.base}/bronze/{table_name}/**/*.parquet"
 
@@ -94,7 +96,6 @@ class SilverProcessor:
 
     def _cast_non_numeric(self, df: Any) -> Any:
         """Cast non-numeric columns sang Utf8 để tránh schema conflicts."""
-        import polars as pl
         NUMERIC = (
             pl.Int8, pl.Int16, pl.Int32, pl.Int64,
             pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64,
@@ -119,7 +120,6 @@ class SilverProcessor:
         return path
 
     def _add_audit(self, df: Any, run_id: str) -> Any:
-        import polars as pl
         return df.with_columns([
             pl.lit(datetime.now(timezone.utc).isoformat()).alias("_ingested_at"),
             pl.lit(run_id).alias("_pipeline_run_id"),
@@ -127,7 +127,6 @@ class SilverProcessor:
 
     def _dedup(self, df: Any, keys: List[str], run_id: str, source: str) -> Any:
         """Dedup qua DeduplicationEngine (pandas bridge)."""
-        import polars as pl
         from platforms.processing.base_processing_subsystem import (
             DeduplicationEngine,
             DeduplicationStrategy,
@@ -147,7 +146,6 @@ class SilverProcessor:
         return pl.from_pandas(deduped)
 
     def _safe_cast(self, df: Any, col: str, dtype: Any) -> Any:
-        import polars as pl
         if col not in df.columns:
             return df
         return df.with_columns(pl.col(col).cast(dtype, strict=False).alias(col))
@@ -158,7 +156,6 @@ class SilverProcessor:
 
     def transform_stock_prices(self, target_date: str, run_id: str) -> Dict[str, Any]:
         """bronze/stock_prices → silver/fact_stock_price"""
-        import polars as pl
         df = self._read_bronze("stock_prices", target_date)
         if df is None:
             return {"rows_in": 0, "rows_out": 0, "silver_path": None}
@@ -182,7 +179,6 @@ class SilverProcessor:
 
     def transform_company_profile(self, target_date: str, run_id: str) -> Dict[str, Any]:
         """bronze/company_profile → silver/dim_company"""
-        import polars as pl
         df = self._read_bronze("company_profile", target_date)
         if df is None:
             return {"rows_in": 0, "rows_out": 0, "silver_path": None}
@@ -198,7 +194,6 @@ class SilverProcessor:
 
     def transform_financial_ratios(self, target_date: str, run_id: str) -> Dict[str, Any]:
         """bronze/financial_ratios → silver/fact_financial_metrics"""
-        import polars as pl
         df = self._read_bronze("financial_ratios", target_date)
         if df is None:
             return {"rows_in": 0, "rows_out": 0, "silver_path": None}
@@ -227,7 +222,6 @@ class SilverProcessor:
 
     def transform_business_plan(self, target_date: str, run_id: str) -> Dict[str, Any]:
         """bronze/business_plan → silver/fact_business_plan"""
-        import polars as pl
         df = self._read_bronze("business_plan", target_date)
         if df is None:
             return {"rows_in": 0, "rows_out": 0, "silver_path": None}
@@ -257,7 +251,6 @@ class SilverProcessor:
 
     def transform_income_statement(self, target_date: str, run_id: str) -> Dict[str, Any]:
         """bronze/income_statement_* → silver/fact_income_statement"""
-        import polars as pl
         dfs = []
         for rtype in ("quarter", "year"):
             df = self._read_bronze(f"income_statement_{rtype}", target_date)
@@ -275,7 +268,6 @@ class SilverProcessor:
 
     def transform_balance_sheet(self, target_date: str, run_id: str) -> Dict[str, Any]:
         """bronze/balance_sheet_* → silver/fact_balance_sheet"""
-        import polars as pl
         dfs = []
         for rtype in ("quarter", "year"):
             df = self._read_bronze(f"balance_sheet_{rtype}", target_date)
@@ -293,7 +285,6 @@ class SilverProcessor:
 
     def transform_industry_sectors(self, target_date: str, run_id: str) -> Dict[str, Any]:
         """bronze/industry_sectors → silver/dim_industry"""
-        import polars as pl
         df = self._read_bronze("industry_sectors", target_date)
         if df is None:
             return {"rows_in": 0, "rows_out": 0, "silver_path": None}
@@ -310,7 +301,6 @@ class SilverProcessor:
 
     def transform_market_type_sectors(self, target_date: str, run_id: str) -> Dict[str, Any]:
         """bronze/market_type_sectors → silver/dim_market_type"""
-        import polars as pl
         df = self._read_bronze("market_type_sectors", target_date)
         if df is None:
             return {"rows_in": 0, "rows_out": 0, "silver_path": None}
@@ -328,7 +318,6 @@ class SilverProcessor:
 
     def transform_industry_info(self, target_date: str, run_id: str) -> Dict[str, Any]:
         """bronze/industry_info_* → silver/fact_industry_summary"""
-        import polars as pl
         dfs = []
         for kind in ("summary_info", "financial_info", "fund_info"):
             df = self._read_bronze(
@@ -363,15 +352,13 @@ class SilverExecutor(BaseExecutor):
     def __init__(
         self,
         context: ExecutionContext,
-        config: "Cophieu68PipelineConfig",
+        config: BasePipelineConfig,
     ) -> None:
         self.context = context
         self.config  = config
-        self.logger  = context.logger
+        self.logger  = context.logger or logger_manager.get_logger(__name__)
 
     def execute(self) -> Dict[str, Any]:
-        from platforms.processing.base_processing_subsystem import ErrorLevel
-
         self.logger.info(
             "[SilverExecutor] Starting silver phase date=%s", self.context.target_date
         )
@@ -383,6 +370,7 @@ class SilverExecutor(BaseExecutor):
         proc = SilverProcessor(
             polars_engine=polars_engine,
             base_path=self.config.lakehouse_base,
+            logger=self.logger,
         )
 
         transforms = [

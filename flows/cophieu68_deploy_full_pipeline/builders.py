@@ -1,45 +1,21 @@
 """
 flows/cophieu68_deploy_full_pipeline/builders.py
 =================================================
-Domain-specific factory functions cho pipeline cophieu68.
-
-Chứa DUY NHẤT các factory functions có logic cophieu68-specific:
-  - build_extractor()       : ExtractCophieu68 (nguồn cophieu68.com)
-  - build_cleansing_rules() : Cleansing rules cho stock_prices
-
-Các infra builders (polars, pg, minio) đã chuyển lên:
-  → platforms/factory/client_factory.py
-
-Để tạo clients cho pipeline, dùng Cophieu68PipelineConfig làm nguồn tham số:
-    from platforms.factory import build_polars_engine, build_pg_writer, ...
-    from flows.cophieu68_deploy_full_pipeline.pipeline_config import Cophieu68PipelineConfig
-
-    config = Cophieu68PipelineConfig().load()
-    engine = build_polars_engine(**config.polars_build_params)
-    pg     = build_pg_writer(**config.pg_conn_params)
-    minio  = build_minio_backend(**config.minio_build_params)
+Factory functions cophieu68-specific:
+  - build_extractor()       : khởi tạo ExtractCophieu68
+  - build_cleansing_rules() : DQ rules cho stock_prices
 """
 from __future__ import annotations
-
-import logging
 from typing import Any, Dict, Optional, Tuple
-
-from flows.cophieu68_deploy_full_pipeline.pipeline_config import Cophieu68PipelineConfig
+from flows.common.base_config import BasePipelineConfig
 
 
 # ---------------------------------------------------------------------------
 # build_extractor — cophieu68-specific
 # ---------------------------------------------------------------------------
 
-def build_extractor(config: Cophieu68PipelineConfig, logger: Optional[logging.Logger] = None):
-    """
-    Khởi tạo ExtractCophieu68 với config từ Cophieu68PipelineConfig.
-
-    Parameters
-    ----------
-    config : Cophieu68PipelineConfig (đã gọi .load())
-    logger : Optional logger; mặc định lấy từ logger_manager.
-    """
+def build_extractor(config: BasePipelineConfig, logger=None):
+    """Khởi tạo ExtractCophieu68. config phải đã gọi .load()."""
     from flows.cophieu68_deploy_full_pipeline.ingestion.source.extract_cophieu68 import (
         ExtractCophieu68,
     )

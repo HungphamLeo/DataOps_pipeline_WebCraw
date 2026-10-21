@@ -21,19 +21,18 @@ Không chứa:
 """
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-
+import polars as pl
+from shared.logger.logger_setup import logger_manager
 from platforms.processing.base_processing_subsystem import (
     CleansingRuleSet,
     ErrorLevel,
 )
 from platforms.factory.client_factory import build_polars_engine
 
-from flows.common.base_executor import BaseExecutor
+from flows.common.base_config import BasePipelineConfig, BaseExecutor
 from flows.common.context import ExecutionContext, make_batch_id
-from flows.cophieu68_deploy_full_pipeline.pipeline_config import Cophieu68PipelineConfig
 from flows.cophieu68_deploy_full_pipeline.builders import (
     build_extractor,
     build_cleansing_rules,
@@ -58,12 +57,80 @@ class BronzeIngester:
         self,
         engine,
         base_path: str = "s3://lakehouse",
-        governance_logger: Optional[logging.Logger] = None,
+        governance_logger=None,
     ) -> None:
         self.engine           = engine
         self.base_path        = base_path
-        self.logger           = engine.logger
-        self.governance_logger = governance_logger or engine.logger
+        self.logger           = getattr(engine, "logger", None) or logger_manager.get_logger(__name__)
+        self.governance_logger = governance_logger or self.logger
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _profile(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if not records:
+            return {"total_rows": 0, "columns": []}
+        cols = list(records[0].keys())
+        null_counts = {c: sum(1 for r in records if r.get(c) is None) for c in cols}
+        return {"total_rows": len(records), "columns": cols, "null_counts": null_counts}
+
+    def _apply_dq(
+        self,
+        records: List[Dict[str, Any]],
+        cleansing: CleansingRuleSet,
+        run_id: str,
+    ) -> tuple:
+        """Stamp _dq_status onto each record; return (enriched, violations)."""
+        processed, violations = [], []
+        for rec in records:
+            valid, messages = cleansing.apply(rec)
+            rec["_dq_status"] = "PASS" if valid else "WARN"
+            rec["_dq_errors"] = "; ".join(messages) if messages else ""
+            rec["_run_id"]    = run_id
+            if not valid:
+                violations.append({"record": rec, "messages": messages})
+            processed.append(rec)
+        return processed, violations
+
+    @staticmethod
+    def _flatten(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Cast every value to str (Bronze = raw strings only).
+        Handles nested DataFrames, numpy scalars, arrays.
+        """
+        import pandas as _pd
+        import numpy as _np
+
+        flat = []
+        for rec in records:
+            out: Dict[str, Any] = {}
+            for k, v in rec.items():
+                if not isinstance(k, str):
+                    continue
+                if isinstance(v, _pd.DataFrame):
+                    out[k] = v.to_json(orient="records")
+                elif v is None:
+                    out[k] = None
+                elif isinstance(v, (_np.integer, _np.floating)):
+                    out[k] = str(v.item())
+                elif isinstance(v, _np.ndarray):
+                    out[k] = str(v.tolist())
+                else:
+                    out[k] = str(v)
+            flat.append(out)
+        return flat
+
+    def _audit_cols(self, df: Any, batch_id: str, run_id: str) -> Any:
+        """Attach _batch_id, _run_id, _ingest_timestamp, ingest_date."""
+        now = datetime.now(timezone.utc)
+        return df.with_columns([
+            pl.lit(batch_id).alias("_batch_id"),
+            pl.lit(run_id).alias("_run_id"),
+            pl.lit(now.isoformat()).alias("_ingest_timestamp"),
+            pl.lit(now.date().isoformat()).alias("ingest_date"),
+        ])
 
     def process(
         self,
@@ -73,7 +140,46 @@ class BronzeIngester:
         symbol: str,
         cleansing: Optional[CleansingRuleSet] = None,
     ) -> Dict[str, Any]:
-        import polars as pl
+        
+
+        profile = self._profile(raw_records)
+
+        if cleansing:
+            enriched, violations = self._apply_dq(raw_records, cleansing, run_id)
+            if violations:
+                self.logger.warning("[Bronze:%s] %d DQ violations", symbol, len(violations))
+                for idx, v in enumerate(violations, 1):
+                    self.governance_logger.warning(
+                        "[DQ][%s] %d/%d: %s",
+                        symbol, idx, len(violations), "; ".join(v["messages"]),
+                    )
+        else:
+            enriched, violations = raw_records, []
+
+        if not enriched:
+            return {
+                "saved_path": None, "reject_path": None,
+                "stats": {**profile, "clean": 0, "dq_violations": len(violations)},
+            }
+
+        df = pl.DataFrame(enriched)
+        if "symbol" not in df.columns:
+            df = df.with_columns(pl.lit(symbol.upper()).alias("symbol"))
+        df = self._audit_cols(df, batch_id, run_id)
+
+        path = f"{self.base_path}/bronze/stock_prices/"
+        self.engine.write_parquet(df=df, target_path=path, partition_by=["ingest_date"])
+
+        reject_path = None
+        if violations:
+            reject_path = f"{self.base_path}/bronze/_dq_violations/stock_prices/"
+            reject_df = pl.DataFrame([v["record"] for v in violations])
+            self.engine.write_parquet(df=reject_df, target_path=reject_path)
+
+        return {
+            "saved_path": path, "reject_path": reject_path,
+            "stats": {**profile, "clean": len(enriched), "dq_violations": len(violations)},
+        }
 
     # ------------------------------------------------------------------
     # ingest — generic, all tables
@@ -96,7 +202,7 @@ class BronzeIngester:
             (all Utf8 cho bronze layer, tự động bổ sung audit cols)
           - Fallback: all-Utf8 schema từ keys của record đầu tiên
         """
-        import polars as pl
+        
 
         if not records:
             self.logger.warning("[Bronze] No records for table=%s symbol=%s", table_name, symbol)
@@ -108,7 +214,7 @@ class BronzeIngester:
         if cleansing:
             flat, violations = self._apply_dq(flat, cleansing, run_id)
         if not flat:
-            return {"saved_path": None, "rows": 0, "dq_violations": 0}
+            return {"saved_path": None, "rows": 0, "dq_violations": len(violations)}
 
         # ── Schema enforcement từ registry ──────────────────────────────
         tbl_def = get_bronze_table(table_name)
@@ -158,33 +264,12 @@ class BronzeExecutor(BaseExecutor):
     def __init__(
         self,
         context: ExecutionContext,
-        config: "Cophieu68PipelineConfig",
+        config: BasePipelineConfig,
     ) -> None:
         self.context = context
         self.config  = config
-        self.logger  = context.logger
+        self.logger  = context.logger or logger_manager.get_logger(__name__)
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _lineage(self, source: str, table: str, rows: int) -> None:
-        self.context.metadata_repo.log_lineage(
-            run_id=self.context.run_id,
-            source_layer="external", source_table=source,
-            target_layer="bronze",   target_table=table,
-            operation="APPEND",      rows_affected=rows,
-        )
-
-    def _dq_warn(self, table: str, count: int) -> None:
-        if count > 0:
-            self.context.error_log.add(
-                ErrorLevel.WARNING, f"{count} DQ issues in bronze.{table}"
-            )
-
-    # ------------------------------------------------------------------
-    # Per-symbol steps
-    # ------------------------------------------------------------------
 
     def _step_trading(self, ext, ing, sym, bid, res) -> None:
         data = ext.crawl_trading_data(symbol=sym, page=1)
@@ -205,9 +290,7 @@ class BronzeExecutor(BaseExecutor):
         )
         rows = r["stats"]["clean"]
         res["rows_ingested"] += rows
-        res["dq_issues"]     += r["stats"].get("dq_violations", 0)
-        self._dq_warn("stock_prices", r["stats"].get("dq_violations", 0))
-        self._lineage(f"cophieu68_{sym}", "bronze_stock_prices", rows)
+        
 
     def _step_company_profile(self, ext, ing, sym, bid, res) -> None:
         raw = ext.crawl_company_profile(symbol=sym)
@@ -218,7 +301,7 @@ class BronzeExecutor(BaseExecutor):
             return
         r = ing.ingest("company_profile", [rec], bid, self.context.run_id, sym)
         res["rows_ingested"] += r["rows"]
-        self._lineage(f"cophieu68_{sym}", "bronze_company_profile", r["rows"])
+        
 
     def _step_financial_ratios(self, ext, ing, sym, bid, res) -> None:
         raw = ext.crawl_financial_ratios(symbol=sym)
@@ -229,7 +312,7 @@ class BronzeExecutor(BaseExecutor):
             return
         r = ing.ingest("financial_ratios", [rec], bid, self.context.run_id, sym)
         res["rows_ingested"] += r["rows"]
-        self._lineage(f"cophieu68_{sym}", "bronze_financial_ratios", r["rows"])
+        
 
     def _step_financial_report_summary(self, ext, ing, sym, bid, res) -> None:
         raw = ext.crawl_financial_report_summary(symbol=sym)
@@ -251,7 +334,7 @@ class BronzeExecutor(BaseExecutor):
             return
         r = ing.ingest("financial_report_summary", records, bid, self.context.run_id, sym)
         res["rows_ingested"] += r["rows"]
-        self._lineage(f"cophieu68_{sym}", "bronze_financial_report_summary", r["rows"])
+        
 
     def _step_business_plan(self, ext, ing, sym, bid, res) -> None:
         raw = ext.crawl_business_plan(symbol=sym)
@@ -259,7 +342,7 @@ class BronzeExecutor(BaseExecutor):
             return
         r = ing.ingest("business_plan", raw["data"], bid, self.context.run_id, sym)
         res["rows_ingested"] += r["rows"]
-        self._lineage(f"cophieu68_{sym}", "bronze_business_plan", r["rows"])
+        
 
     def _step_income_statement(self, ext, ing, sym, bid, res, report_type: str) -> None:
         raw = ext.crawl_details_income_statement(symbol=sym, report_type=report_type)
@@ -278,8 +361,7 @@ class BronzeExecutor(BaseExecutor):
         table = f"income_statement_{report_type}"
         r = ing.ingest(table, records, bid, self.context.run_id, sym)
         res["rows_ingested"] += r["rows"]
-        self._lineage(f"cophieu68_{sym}", f"bronze_{table}", r["rows"])
-
+        
     def _step_balance_sheet(self, ext, ing, sym, bid, res, report_type: str) -> None:
         raw = ext.crawl_details_balance_sheet(symbol=sym, report_type=report_type)
         if not raw:
@@ -297,7 +379,7 @@ class BronzeExecutor(BaseExecutor):
         table = f"balance_sheet_{report_type}"
         r = ing.ingest(table, records, bid, self.context.run_id, sym)
         res["rows_ingested"] += r["rows"]
-        self._lineage(f"cophieu68_{sym}", f"bronze_{table}", r["rows"])
+        
 
     # ------------------------------------------------------------------
     # Global steps (run once, not per-symbol)
@@ -310,8 +392,7 @@ class BronzeExecutor(BaseExecutor):
         records = [r if isinstance(r, dict) else r.__dict__ for r in rows]
         r = ing.ingest("industry_sectors", records, bid, self.context.run_id)
         res["rows_ingested"] += r["rows"]
-        self._lineage("cophieu68_global", "bronze_industry_sectors", r["rows"])
-
+        
     def _step_market_type_sectors(self, ext, ing, bid, res) -> None:
         rows = ext.crawl_company_info_belong_to_market_type()
         if not rows:
@@ -319,7 +400,7 @@ class BronzeExecutor(BaseExecutor):
         records = [r if isinstance(r, dict) else r.__dict__ for r in rows]
         r = ing.ingest("market_type_sectors", records, bid, self.context.run_id)
         res["rows_ingested"] += r["rows"]
-        self._lineage("cophieu68_global", "bronze_market_type_sectors", r["rows"])
+        
 
     def _step_industry_info(self, ext, ing, bid, res, type_info: str) -> None:
         raw = ext.crawl_industry_info(type_info=type_info)
@@ -335,7 +416,7 @@ class BronzeExecutor(BaseExecutor):
         table = f"industry_info_{type_info}"
         r = ing.ingest(table, records, bid, self.context.run_id)
         res["rows_ingested"] += r["rows"]
-        self._lineage("cophieu68_global", f"bronze_{table}", r["rows"])
+        
 
     # ------------------------------------------------------------------
     # execute

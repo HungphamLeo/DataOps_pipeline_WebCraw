@@ -1,22 +1,9 @@
 """
-flows/shared/base_config.py
+flows/common/base_config.py
 ============================
-BasePipelineConfig — quản lý tập trung toàn bộ config của một pipeline.
-
-Nguyên tắc thiết kế:
-  - SRP: class này CHỈ lo việc đọc env + load YAML. Không chứa Executor, không chứa
-    business logic.
-  - OCP: pipeline mới subclass BasePipelineConfig và override chỉ những gì khác biệt
-    (ví dụ: DEFAULT_SYMBOLS, tên YAML config, required_sections).
-  - DIP: Executor/Orchestrator nhận BasePipelineConfig qua constructor, không import
-    module-level constants trực tiếp.
-
-Vấn đề được giải quyết so với context.py cũ:
-  - context.py cũ: module-level `os.getenv()` chạy ngay lúc import → side effects,
-    khó test, khó mock.
-  - BasePipelineConfig: lazy load — env chỉ được đọc khi gọi `load()` hoặc truy cập
-    property. Safe khi import.
-  - os.environ["S3_ENDPOINT"] = ... (global mutation) đã được loại bỏ khỏi import time.
+BasePipelineConfig  — đọc .env + load YAML. Không chứa business logic.
+BaseExecutor        — abstract base cho tất cả phase executors.
+BasePipelineOrchestrator — template orchestrator, subclass override _create_executors().
 """
 from __future__ import annotations
 
@@ -154,6 +141,19 @@ class BasePipelineConfig:
         }
 
     @property
+    def polars_build_params(self) -> Dict[str, Any]:
+        """Kwargs cho build_polars_engine()."""
+        return {"storage_options": self.storage_options}
+
+    @property
+    def extractor_pipeline_config(self) -> Dict[str, Any]:
+        """Config dict truyền thẳng vào ExtractCophieu68(pipeline_config=...)."""
+        return self._yaml_data
+
+    # DEFAULT_SYMBOLS — subclass override để cung cấp mã mặc định
+    DEFAULT_SYMBOLS: List[str] = []
+
+    @property
     def pg_host(self) -> str:
         return os.getenv("POSTGRES_HOST", "localhost")
 
@@ -234,46 +234,22 @@ class BasePipelineConfig:
 
 
 class BaseExecutor(ABC):
-    """
-    Abstract base cho tất cả phase executors (Bronze / Silver / Gold / Serving).
+    """Abstract base cho tất cả phase executors (Bronze / Silver / Serving)."""
 
-    Constructor convention (subclass nên giữ):
-        def __init__(self, context: ExecutionContext, config: BasePipelineConfig) -> None:
-            self.context = context
-            self.config  = config
-            self.logger  = context.logger
-    """
-    def __init__(self, context: Any, config: BasePipelineConfig) -> None:
+    def __init__(self, context: Any, config: Any) -> None:
         self.context = context
         self.config  = config
-        self.phase   = config.phase
-        self.logger  =  logger_manager.get_logger(
-            f"config.{self.phase}"
-        )
-             
+        self.logger  = getattr(context, "logger", None) or logger_manager.get_logger(__name__)
+
     @abstractmethod
     def execute(self) -> Dict[str, Any]:
-        """
-        Chạy toàn bộ phase, trả về result dict.
-
-        Result dict phải có ít nhất:
-          - "phase"  : str  — tên phase ("bronze" / "silver" / ...)
-          - "errors" : int  — số lỗi gặp phải (0 = không lỗi)
-        """
-
-    # ------------------------------------------------------------------
-    # Optional lifecycle hooks — subclass override nếu cần
-    # ------------------------------------------------------------------
+        """Chạy phase, trả về dict có ít nhất {"phase": str, "errors": int}."""
 
     def pre_execute(self) -> None:
-        """Chạy trước execute(). Dùng để setup, acquire resources."""
+        """Hook trước execute(). Override nếu cần setup."""
 
     def post_execute(self, result: Dict[str, Any]) -> None:
-        """Chạy sau execute(). Dùng để cleanup, emit metrics."""
-
-    # ------------------------------------------------------------------
-    # Helper — log lineage nếu context có metadata_repo
-    # ------------------------------------------------------------------
+        """Hook sau execute(). Override nếu cần cleanup."""
 
     def _log_lineage(
         self,
@@ -285,41 +261,31 @@ class BaseExecutor(ABC):
         operation: str,
         rows: int,
     ) -> None:
-        if hasattr(self, "context") and self.context.metadata_repo:
-            try:
-                self.context.metadata_repo.log_lineage(
-                    run_id=run_id,
-                    source_layer=source_layer,
-                    source_table=source_table,
-                    target_layer=target_layer,
-                    target_table=target_table,
-                    operation=operation,
-                    rows_affected=rows,
-                )
-            except Exception:
+        repo = getattr(self.context, "metadata_repo", None)
+        if repo is None:
+            return
+        try:
+            repo.log_lineage(
+                run_id=run_id,
+                source_layer=source_layer,
+                source_table=source_table,
+                target_layer=target_layer,
+                target_table=target_table,
+                operation=operation,
+                rows_affected=rows,
+            )
+        except Exception:
+            if self.logger:
                 self.logger.warning(
-                    "[Executor:%s] Failed to log lineage: %s -> %s",
-                    self.__class__.__name__,
-                    source_table,
-                    target_table,
+                    "[Executor:%s] lineage log failed: %s -> %s",
+                    self.__class__.__name__, source_table, target_table,
                 )
 
 
 
 class BasePipelineOrchestrator:
     """
-    Template orchestrator cho tất cả pipelines.
-
-    Subclass bắt buộc override:
-      - _create_executors(context, config) → Dict[str, BaseExecutor]
-            Trả về dict phase → executor instance.
-            Ví dụ: {"bronze": BronzeExecutor(ctx, cfg), "silver": SilverExecutor(ctx, cfg)}
-
-    Subclass có thể override:
-      - _phase_order() → List[str]
-            Thứ tự các phase khi chạy FULL. Mặc định: bronze, silver, gold, serving.
-      - _validate_config(config) → Dict[str, Any]
-            Logic validate config của từng pipeline.
+    Template orchestrator. Subclass override _create_executors() và _phase_order().
     """
 
     PIPELINE_NAME: str = "base"
@@ -329,8 +295,6 @@ class BasePipelineOrchestrator:
         config: BasePipelineConfig,
         logger: Optional[logging.Logger] = None,
     ) -> None:
-        from shared.logger.logger_setup import logger_manager
-
         self.config = config
         self.logger = logger or logger_manager.get_logger(
             f"orchestrator.{self.PIPELINE_NAME}"
@@ -350,18 +314,7 @@ class BasePipelineOrchestrator:
         environment: str = "prod",
         dry_run: bool = False,
     ) -> Dict[str, Any]:
-        """
-        Entry point duy nhất. Gọi từ CLI hoặc Prefect flow.
-
-        Parameters
-        ----------
-        phase       : "bronze" | "silver" | "gold" | "serving" | "full" | "validate"
-        symbols     : List mã cổ phiếu. None = dùng default của pipeline.
-        backend     : "polars" | "dbt"
-        target_date : ISO date string "YYYY-MM-DD". None = hôm nay.
-        environment : "dev" | "prod"
-        dry_run     : Nếu True, chỉ validate config, không chạy thật.
-        """
+        """Entry point duy nhất. phase: bronze | silver | full | validate"""
         from flows.common.context import (
             ExecutionContext, ExecutionPhase, ProcessingBackend, make_run_id
         )
@@ -450,15 +403,13 @@ class BasePipelineOrchestrator:
         )
 
     def _phase_order(self) -> List[str]:
-        """Thứ tự chạy các phase khi phase == FULL."""
-        return ["bronze", "silver", "gold", "serving"]
+        """Thứ tự chạy khi phase == FULL. Subclass override nếu cần."""
+        return ["bronze", "silver", "serving"]
 
     def _default_symbols(self) -> List[str]:
-        """Default symbols khi caller không truyền vào. Subclass override."""
         return []
 
     def _validate_config(self, context: Any) -> Dict[str, Any]:
-        """Validate config. Subclass override để thêm domain-specific checks."""
         v = self.config.validate()
         if not v["is_valid"]:
             return {"status": "VALIDATION_FAILED", "errors": v["errors"]}
@@ -484,28 +435,21 @@ class BasePipelineOrchestrator:
             if context.phase == ExecutionPhase.FULL
             else [context.phase.value]
         )
-
         executors = self._create_executors(context, self.config)
-
         results: Dict[str, Any] = {
-            "status":          "COMPLETED",
+            "status": "COMPLETED",
             "phases_executed": [],
-            "phase_results":   {},
+            "phase_results": {},
         }
-
         for phase_name in phases:
             executor = executors.get(phase_name)
             if executor is None:
-                self.logger.warning(
-                    "[%s] No executor for phase=%s — skipping",
-                    self.PIPELINE_NAME, phase_name,
-                )
+                self.logger.warning("[%s] No executor for phase=%s — skipping",
+                                    self.PIPELINE_NAME, phase_name)
                 continue
-
             executor.pre_execute()
             res = executor.execute()
             executor.post_execute(res)
-
             results["phase_results"][phase_name] = res
             results["phases_executed"].append(phase_name)
 
@@ -524,21 +468,13 @@ class BasePipelineOrchestrator:
         )
 
 
-# ---------------------------------------------------------------------------
-# Formatting helper — dùng bởi CLI (pipeline-agnostic)
-# ---------------------------------------------------------------------------
-
 def format_pipeline_result(result: Dict[str, Any], fmt: str = "summary") -> str:
-    """Format kết quả pipeline thành string. Dùng được cho tất cả pipelines."""
+    """Format kết quả pipeline. fmt: 'summary' | 'text' | 'json'"""
     if fmt == "json":
         return json.dumps(result, indent=2, default=str)
-
     if fmt == "text":
-        pipeline = result.get("pipeline", "Pipeline")
         lines = [
-            "=" * 70,
-            pipeline,
-            "=" * 70,
+            "=" * 60,
             f"Run ID  : {result.get('run_id', 'N/A')}",
             f"Status  : {result.get('status', 'UNKNOWN')}",
             f"Duration: {result.get('duration_seconds', 0):.1f}s",
@@ -547,9 +483,8 @@ def format_pipeline_result(result: Dict[str, Any], fmt: str = "summary") -> str:
             lines.append(f"Phases  : {', '.join(result['phases_executed'])}")
         for ev in result.get("error_events", [])[:5]:
             lines.append(f"  [{ev.get('error_level')}] {ev.get('error_message')}")
-        lines.append("=" * 70)
+        lines.append("=" * 60)
         return "\n".join(lines)
-
     status = result.get("status", "UNKNOWN")
     dur    = result.get("duration_seconds", 0)
     return f"{status} | {dur:.1f}s"

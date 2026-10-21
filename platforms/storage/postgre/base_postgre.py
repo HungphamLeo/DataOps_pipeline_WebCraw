@@ -17,7 +17,6 @@ DIP: Callers depend on IRelationalStorage abstraction, not this concrete class.
 
 from __future__ import annotations
 
-import logging
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
@@ -25,6 +24,7 @@ import psycopg2
 from psycopg2 import pool as pg_pool
 
 from platforms.storage.base_storage import IRelationalStorage, StorageBackend
+from shared.logger.logger_setup import logger_manager
 
 
 class PostgreSQLWriter(IRelationalStorage):
@@ -46,14 +46,14 @@ class PostgreSQLWriter(IRelationalStorage):
         password: str,
         pool_min: int = 1,
         pool_max: int = 5,
-        logger: Optional[logging.Logger] = None,
+        logger=None,
     ) -> None:
         self.host = host
         self.port = port
         self.database = database
         self.user = username
         self.password = password
-        self.logger = logger or logging.getLogger(__name__)
+        self.logger = logger or logger_manager.get_logger(__name__)
         self._pool = pg_pool.ThreadedConnectionPool(
             pool_min,
             pool_max,
@@ -216,11 +216,11 @@ class PostgreSQLStorageBackend(StorageBackend):
 
     def __init__(
         self,
-        pipeline_logger: Optional[logging.Logger],
+        pipeline_logger=None,
         postgres_writer: PostgreSQLWriter,
     ) -> None:
         self.pg = postgres_writer
-        self.logger = pipeline_logger or logging.getLogger(__name__)
+        self.logger = pipeline_logger or logger_manager.get_logger(__name__)
 
     def save(self, dataset_name: str, data: Any,
              fmt: Optional[str] = None) -> Dict[str, Any]:

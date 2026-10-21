@@ -18,11 +18,11 @@ NOT responsible for:
 from __future__ import annotations
 
 import io
-import logging
 from pathlib import Path
 from typing import List, Optional
 
 from platforms.storage.base_storage import IObjectStorage
+from shared.logger.logger_setup import logger_manager
 
 
 class MinioStorageBackend(IObjectStorage):
@@ -57,7 +57,7 @@ class MinioStorageBackend(IObjectStorage):
             secret_key=secret_key,
             secure=secure,
         )
-        self.logger = logger or logging.getLogger(__name__)
+        self.logger = logger or logger_manager.get_logger(__name__)
 
     # ------------------------------------------------------------------
     # IObjectStorage implementation

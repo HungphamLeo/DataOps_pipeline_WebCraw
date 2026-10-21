@@ -1,19 +1,13 @@
 """
-flows/shared/context.py
+flows/common/context.py
 ========================
-Shared execution primitives — dùng được bởi tất cả pipelines.
+Shared execution primitives.
 
-Chứa:
-  - ExecutionPhase  : enum các phase (BRONZE / SILVER / GOLD / SERVING / FULL / VALIDATE)
-  - ProcessingBackend: enum backend (POLARS / DBT)
-  - ExecutionContext : runtime state dataclass — truyền xuyên suốt pipeline
-  - make_run_id()   : generate unique run ID
-  - make_batch_id() : generate unique batch ID cho một symbol
-
-Không chứa:
-  - Env vars / credentials (→ BasePipelineConfig)
-  - YAML config (→ BasePipelineConfig)
-  - Pipeline-specific constants (→ Cophieu68PipelineConfig)
+- ExecutionPhase    : BRONZE / SILVER / FULL
+- ProcessingBackend : POLARS
+- ExecutionContext  : runtime state truyền xuyên pipeline
+- make_run_id()     : unique run ID
+- make_batch_id()   : unique batch ID per symbol
 """
 from __future__ import annotations
 

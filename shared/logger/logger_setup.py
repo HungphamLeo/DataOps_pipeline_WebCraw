@@ -109,8 +109,8 @@ class LoggerManager:
             self._log_storage = Paths.LOG_STORAGE
         except (ImportError, AttributeError):
             _here = Path(__file__).parent
-            self._config_path = _here / "config" / "logger_config.yaml"
-            self._log_storage = _here / "log_storage"
+            self._config_path = _here / "logger_config.yaml"
+            self._log_storage = _here.parent.parent / "logs"
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -195,6 +195,7 @@ class LoggerManager:
         """
         Thay relative filename trong RotatingFileHandler thành absolute path.
 
+        Giữ nguyên cấu trúc thư mục con (ví dụ logs/bronze/bronze.log → <log_storage>/bronze/bronze.log).
         Tránh phụ thuộc working directory khi chạy pipeline từ các vị trí khác nhau.
         """
         for handler_cfg in cfg.get("handlers", {}).values():
@@ -203,7 +204,12 @@ class LoggerManager:
             if "filename" in handler_cfg:
                 original = Path(handler_cfg["filename"])
                 if not original.is_absolute():
-                    handler_cfg["filename"] = str(self._log_storage / original.name)
+                    # Bỏ phần "logs/" prefix nếu có, giữ phần còn lại (bronze/bronze.log)
+                    parts = original.parts
+                    relative = Path(*parts[1:]) if parts[0] in ("logs", "log") else original
+                    abs_path = self._log_storage / relative
+                    abs_path.parent.mkdir(parents=True, exist_ok=True)
+                    handler_cfg["filename"] = str(abs_path)
 
 
 # ─── Singleton instance ───────────────────────────────────────────────────────
