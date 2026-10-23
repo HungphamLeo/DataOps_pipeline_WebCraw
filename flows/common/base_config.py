@@ -149,7 +149,7 @@ class BasePipelineConfig:
     @property
     def extractor_pipeline_config(self) -> Dict[str, Any]:
         """Config dict truyền thẳng vào ExtractCophieu68(pipeline_config=...)."""
-        return self._yaml_data
+        return self.yaml_params 
 
     # DEFAULT_SYMBOLS — subclass override để cung cấp mã mặc định
     DEFAULT_SYMBOLS: List[str] = []
