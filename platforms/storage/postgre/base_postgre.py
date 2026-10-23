@@ -3,6 +3,8 @@ PostgreSQL Storage Backend
 ===========================
 Refactored with:
   - Connection pooling (psycopg2 ThreadedConnectionPool)
+  - Stale connection detection (ping before use, reconnect on failure)
+  - Pool metrics logging (background thread, mỗi 60s)
   - Proper upsert (INSERT ... ON CONFLICT DO UPDATE)
   - Staging schema support
   - IRelationalStorage interface compliance
@@ -17,73 +19,191 @@ DIP: Callers depend on IRelationalStorage abstraction, not this concrete class.
 
 from __future__ import annotations
 
-import logging
+import threading
+import time
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 import psycopg2
+import psycopg2.extras
 from psycopg2 import pool as pg_pool
 
 from platforms.storage.base_storage import IRelationalStorage, StorageBackend
+from shared.logger.logger_setup import logger_manager
 
+
+# ---------------------------------------------------------------------------
+# Pool Metrics Logger — background thread, log mỗi 60s
+# ---------------------------------------------------------------------------
+
+class _PoolMetricsLogger:
+    """
+    Background daemon thread log pool stats mỗi interval giây.
+
+    Log dạng JSON-structured để ELK/Grafana dễ parse:
+        pool_min, pool_max, checked_out, available
+    """
+
+    def __init__(self, pool: pg_pool.ThreadedConnectionPool, pool_max: int,
+                 logger, interval: int = 60) -> None:
+        self._pool     = pool
+        self._pool_max = pool_max
+        self._logger   = logger
+        self._interval = interval
+        self._stop     = threading.Event()
+        self._thread   = threading.Thread(
+            target=self._run, daemon=True, name="pg-pool-metrics"
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                # psycopg2 ThreadedConnectionPool không expose stats trực tiếp,
+                # dùng internal _used dict để đếm checked-out connections
+                checked_out = len(getattr(self._pool, "_used", {}))
+                available   = self._pool_max - checked_out
+                self._logger.info(
+                    "[PG Pool] pool_max=%d checked_out=%d available=%d",
+                    self._pool_max, checked_out, available,
+                )
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQLWriter
+# ---------------------------------------------------------------------------
 
 class PostgreSQLWriter(IRelationalStorage):
     """
-    Thread-safe PostgreSQL writer with connection pooling.
+    Thread-safe PostgreSQL writer với connection pool + stale detection.
 
     Parameters
     ----------
     host, port, database, username, password : connection params.
     pool_min, pool_max : connection pool bounds (default 1–5).
+    metrics_interval   : giây giữa các lần log pool stats (0 = tắt).
     """
 
     def __init__(
         self,
-        host: str,
-        port: int,
-        database: str,
-        username: str,
-        password: str,
-        pool_min: int = 1,
-        pool_max: int = 5,
-        logger: Optional[logging.Logger] = None,
+        host:             str,
+        port:             int,
+        database:         str,
+        username:         str,
+        password:         str,
+        pool_min:         int = 1,
+        pool_max:         int = 5,
+        metrics_interval: int = 60,
+        logger=None,
     ) -> None:
-        self.host = host
-        self.port = port
+        self.host     = host
+        self.port     = port
         self.database = database
-        self.user = username
+        self.user     = username
         self.password = password
-        self.logger = logger or logging.getLogger(__name__)
-        self._pool = pg_pool.ThreadedConnectionPool(
-            pool_min,
-            pool_max,
-            host=host,
-            port=port,
-            database=database,
-            user=username,
-            password=password,
+        self._pool_min = pool_min
+        self._pool_max = pool_max
+        self.logger   = logger or logger_manager.get_logger(__name__)
+
+        self._conn_kwargs = dict(
+            host=host, port=port, database=database,
+            user=username, password=password,
         )
+
+        self._pool = pg_pool.ThreadedConnectionPool(
+            pool_min, pool_max, **self._conn_kwargs
+        )
+        self.logger.info(
+            "[PG] Pool created pool_min=%d pool_max=%d host=%s db=%s",
+            pool_min, pool_max, host, database,
+        )
+
+        # Khởi động metrics logger nếu interval > 0
+        self._metrics_logger: Optional[_PoolMetricsLogger] = None
+        if metrics_interval > 0:
+            self._metrics_logger = _PoolMetricsLogger(
+                pool=self._pool,
+                pool_max=pool_max,
+                logger=self.logger,
+                interval=metrics_interval,
+            )
+            self._metrics_logger.start()
 
     # ------------------------------------------------------------------
     # Connection management
     # ------------------------------------------------------------------
 
+    def _ping(self, conn) -> bool:
+        """Kiểm tra connection còn sống không bằng SELECT 1."""
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            return True
+        except Exception:
+            return False
+
+    def _fresh_conn(self):
+        """Tạo connection mới trực tiếp (bypass pool) khi cần reconnect."""
+        return psycopg2.connect(**self._conn_kwargs)
+
     @contextmanager
     def _conn(self):
-        """Acquire a connection from the pool, release on exit."""
+        """
+        Acquire connection từ pool, kiểm tra stale, reconnect nếu cần.
+
+        Flow:
+            1. getconn() từ pool
+            2. ping() — nếu fail → putconn(close=True) → tạo connection mới
+            3. yield connection
+            4. commit hoặc rollback tùy exception
+            5. putconn() trả về pool
+        """
         conn = self._pool.getconn()
+        reconnected = False
         try:
+            if not self._ping(conn):
+                # Connection cũ bị drop (vd: sau Docker restart PG)
+                self.logger.warning("[PG] Stale connection detected — reconnecting")
+                try:
+                    self._pool.putconn(conn, close=True)
+                except Exception:
+                    pass
+                conn = self._fresh_conn()
+                reconnected = True
+
             yield conn
             conn.commit()
+
         except Exception:
-            conn.rollback()
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             raise
+
         finally:
-            self._pool.putconn(conn)
+            if reconnected:
+                # Connection mới tạo trực tiếp, đóng sau dùng (không trả pool)
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            else:
+                self._pool.putconn(conn)
 
     def close(self) -> None:
-        """Close all connections in the pool."""
+        """Dừng metrics logger và đóng tất cả connections trong pool."""
+        if self._metrics_logger:
+            self._metrics_logger.stop()
         self._pool.closeall()
+        self.logger.info("[PG] Pool closed")
 
     # ------------------------------------------------------------------
     # IRelationalStorage implementation
@@ -135,10 +255,10 @@ class PostgreSQLWriter(IRelationalStorage):
 
     def upsert(
         self,
-        target: str,
-        data: List[Dict[str, Any]],
+        target:           str,
+        data:             List[Dict[str, Any]],
         conflict_columns: List[str],
-        update_columns: Optional[List[str]] = None,
+        update_columns:   Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         INSERT ... ON CONFLICT (conflict_columns) DO UPDATE SET ...
@@ -148,14 +268,13 @@ class PostgreSQLWriter(IRelationalStorage):
         if not data:
             return {"ok": True, "upserted_count": 0}
 
-        keys = list(data[0].keys())
-        cols = ", ".join(f'"{k}"' for k in keys)
-        placeholders = ", ".join(f"%({k})s" for k in keys)
+        keys          = list(data[0].keys())
+        cols          = ", ".join(f'"{k}"' for k in keys)
+        placeholders  = ", ".join(f"%({k})s" for k in keys)
         conflict_cols = ", ".join(f'"{c}"' for c in conflict_columns)
 
         upd_cols = update_columns or [k for k in keys if k not in conflict_columns]
         if not upd_cols:
-            # All columns are conflict keys — just skip on conflict
             do_clause = "DO NOTHING"
         else:
             set_pairs = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in upd_cols)
@@ -179,7 +298,6 @@ class PostgreSQLWriter(IRelationalStorage):
         """Accept DataFrame or list-of-dicts and INSERT."""
         try:
             import pandas as pd
-
             if isinstance(data, pd.DataFrame):
                 data = data.to_dict("records")
         except ImportError:
@@ -207,6 +325,10 @@ class PostgreSQLWriter(IRelationalStorage):
         return {"ok": True, "statements_executed": len(statements)}
 
 
+# ---------------------------------------------------------------------------
+# PostgreSQLStorageBackend — legacy adapter
+# ---------------------------------------------------------------------------
+
 class PostgreSQLStorageBackend(StorageBackend):
     """
     Adapter: exposes PostgreSQLWriter as a StorageBackend (legacy interface).
@@ -216,11 +338,11 @@ class PostgreSQLStorageBackend(StorageBackend):
 
     def __init__(
         self,
-        pipeline_logger: Optional[logging.Logger],
-        postgres_writer: PostgreSQLWriter,
+        pipeline_logger=None,
+        postgres_writer: Optional[PostgreSQLWriter] = None,
     ) -> None:
-        self.pg = postgres_writer
-        self.logger = pipeline_logger or logging.getLogger(__name__)
+        self.pg     = postgres_writer
+        self.logger = pipeline_logger or logger_manager.get_logger(__name__)
 
     def save(self, dataset_name: str, data: Any,
              fmt: Optional[str] = None) -> Dict[str, Any]:

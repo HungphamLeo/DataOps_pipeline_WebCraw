@@ -59,16 +59,24 @@ class Cophieu68BeautifulSoupCrawler(BaseHttpCrawler):
     """
 
     def __init__(self, pipeline_config: dict, pipeline_logger) -> None:
+        from platforms.ingestion.base_crawler import RetryConfig
         cfg = pipeline_config
         self.crawler_cfg = cfg["sources"]["cophieu68"]
+        http_cfg   = cfg.get("http", {})
+        retry_cfg  = http_cfg.get("retry", {})
         super().__init__(
-            base_url=self.crawler_cfg["base_url"],
-            delay_seconds=cfg["http"].get("delay_seconds", 0.2),
-            timeout_seconds=cfg["http"].get("timeout_seconds", 30),
-            headers=cfg["http"].get("headers", {}),
-            logger=pipeline_logger,
+            base_url        = self.crawler_cfg["base_url"],
+            delay_seconds   = http_cfg.get("delay_seconds", 0.2),
+            timeout_seconds = http_cfg.get("timeout_seconds", 30),
+            headers         = http_cfg.get("headers", {}),
+            retry_config    = RetryConfig(
+                max_attempts = retry_cfg.get("max_attempts", 5),
+                base_delay   = retry_cfg.get("base_delay", 1.0),
+                cap          = retry_cfg.get("cap", 60.0),
+                jitter       = retry_cfg.get("jitter", True),
+            ),
+            logger = pipeline_logger,
         )
-        # get_soup, safe_extract_text, extract_number — inherited
 
 
 # ─────────────────────────────────────────────────────────────────────────────

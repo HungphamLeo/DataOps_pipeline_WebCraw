@@ -1,0 +1,227 @@
+version: 1
+disable_existing_loggers: false
+
+# ── Formatter ─────────────────────────────────────────────────────────────────
+formatters:
+  default:
+    format: "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
+    datefmt: "%Y-%m-%dT%H:%M:%S"
+  json:
+    (): shared.logger.logger_setup.JsonFormatter
+    datefmt: "%Y-%m-%dT%H:%M:%S%z"
+
+# ── Handlers ──────────────────────────────────────────────────────────────────
+# daily rotate, keep 30 days, UTF-8
+handlers:
+  console:
+    class: logging.StreamHandler
+    formatter: default
+    level: INFO
+
+  ingestion_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/ingestion/ingestion.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: json
+    level: DEBUG
+
+  bronze_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/bronze/bronze.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: json
+    level: DEBUG
+
+  silver_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/silver/silver.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: json
+    level: DEBUG
+
+  serving_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/serving/serving.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: json
+    level: DEBUG
+
+  etl_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/etl/etl.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: json
+    level: DEBUG
+
+    # trong handlers:
+  contract_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/data_contract/data_contract.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: json
+    level: DEBUG
+
+  
+
+  platform_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/platform/platform.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: json
+    level: DEBUG
+
+  prefect_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/prefect/prefect.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: json
+    level: DEBUG
+
+# ── Loggers ───────────────────────────────────────────────────────────────────
+loggers:
+
+  # ── Prefect orchestration (PrefectETLPipelineConfig dùng "logger.prefect") ──
+  logger.prefect:
+    level: DEBUG
+    handlers: [console, prefect_file]
+    propagate: false
+
+  logger.ingestion:
+    level: DEBUG
+    handlers: [console, ingestion_file]
+    propagate: false
+
+  logger.bronze:
+    level: DEBUG
+    handlers: [console, bronze_file]
+    propagate: false
+
+  logger.silver:
+    level: DEBUG
+    handlers: [console, silver_file]
+    propagate: false
+
+  # ── Pipeline orchestrator / executor (BasePipelineOrchestrator, BasePipelineConfig) ──
+  # Tên: f"orchestrator.{PIPELINE_NAME}" và f"config.{PIPELINE_NAME}"
+  orchestrator.cophieu68:
+    level: DEBUG
+    handlers: [console, etl_file]
+    propagate: false
+
+  config.cophieu68:
+    level: DEBUG
+    handlers: [console, etl_file]
+    propagate: false
+
+  # ── Extractor / ingestion (builders.build_extractor) ──
+  extractor.cophieu68:
+    level: DEBUG
+    handlers: [console, ingestion_file]
+    propagate: false
+
+  # ── Platform clients — tên truyền vào client_factory (không có prefix) ──
+  # build_polars_engine → logger_manager.get_logger("polars_engine")
+  polars_engine:
+    level: DEBUG
+    handlers: [console, platform_file]
+    propagate: false
+
+  # build_pg_writer → logger_manager.get_logger("pg_writer")
+  pg_writer:
+    level: DEBUG
+    handlers: [console, serving_file]
+    propagate: false
+
+  # build_minio_backend → logger_manager.get_logger("minio_storage")
+  minio_storage:
+    level: DEBUG
+    handlers: [console, platform_file]
+    propagate: false
+
+  # ── platforms.* — logging.getLogger(__name__) từ platform modules ──
+  platforms.processing.polars.polars_engine:
+    level: DEBUG
+    handlers: [console, platform_file]
+    propagate: false
+
+  platforms.processing.base_processing_subsystem:
+    level: DEBUG
+    handlers: [console, platform_file]
+    propagate: false
+
+  platforms.storage.postgre.base_postgre:
+    level: DEBUG
+    handlers: [console, serving_file]
+    propagate: false
+
+  platforms.storage.minio.minio_storage:
+    level: DEBUG
+    handlers: [console, platform_file]
+    propagate: false
+
+  platforms.orchestration.prefect.prefect_main:
+    level: DEBUG
+    handlers: [console, prefect_file]
+    propagate: false
+
+  platforms.factory.client_factory:
+    level: DEBUG
+    handlers: [console, etl_file]
+    propagate: false
+
+  # ── flows.* — logging.getLogger(__name__) từ flow modules ──
+  flows.cophieu68_deploy_full_pipeline.bronze:
+    level: DEBUG
+    handlers: [console, bronze_file]
+    propagate: false
+
+  flows.cophieu68_deploy_full_pipeline.silver:
+    level: DEBUG
+    handlers: [console, silver_file]
+    propagate: false
+
+  flows.cophieu68_deploy_full_pipeline.serving:
+    level: DEBUG
+    handlers: [console, serving_file]
+    propagate: false
+
+  flows.common.base_config:
+    level: DEBUG
+    handlers: [console, etl_file]
+    propagate: false
+
+  # trong loggers:
+  data_contract:
+    level: DEBUG
+    handlers: [console, contract_file]
+    propagate: false
+
+
+# ── Root fallback ──────────────────────────────────────────────────────────────
+root:
+  level: INFO
+  handlers: [console]

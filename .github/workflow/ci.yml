@@ -1,0 +1,60 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip, cache-dependency-path: requirements-dev.txt }
+      - run: pip install "ruff>=0.6"
+      - run: ruff check .
+      # `ruff format --check` chưa bật: codebase chưa format lần nào.
+      # Bật sau khi chạy `ruff format .` một lần trong PR riêng.
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip, cache-dependency-path: requirements-dev.txt }
+      - run: pip install -r requirements-dev.txt
+      - run: mypy platforms shared
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip, cache-dependency-path: requirements-dev.txt }
+      - run: pip install -r requirements-dev.txt
+      - run: pytest --cov --cov-report=term-missing --cov-report=xml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+
+  docker-build:
+    needs: [lint, typecheck, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra_webcraw/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

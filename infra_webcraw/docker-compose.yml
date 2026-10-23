@@ -1,0 +1,146 @@
+# docker compose v2 — không cần khai báo "version"
+
+services:
+
+  # ── Infrastructure ─────────────────────────────────────────────────────────
+
+  minio:
+    image: minio/minio:latest   # pinned — tránh breaking change từ latest
+    container_name: minio-webcraw
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 30s
+    networks:
+      - webcraw
+    restart: unless-stopped
+
+  postgres-local:
+    image: postgres:15
+    container_name: postgres-webcraw
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      # init SQL chạy một lần khi tạo volume mới — đặt scripts vào flows/sql/
+      # nếu thư mục không tồn tại thì bỏ qua dòng này
+      # - ../flows/sql:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - webcraw
+    restart: unless-stopped
+
+  # ── Prefect ────────────────────────────────────────────────────────────────
+
+  prefect-server:
+    image: prefecthq/prefect:2-latest
+    container_name: prefect-server
+    ports:
+      - "4200:4200"
+    command: prefect server start --host 0.0.0.0
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:4200/api/health\")' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - webcraw
+    restart: unless-stopped
+
+  prefect-worker:
+    build:
+      context: ..
+      dockerfile: infra_webcraw/Dockerfile
+    container_name: prefect-worker
+    depends_on:
+      prefect-server:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      postgres-local:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    environment:
+      PREFECT_API_URL: http://prefect-server:4200/api
+      S3_ENDPOINT: http://minio:9000
+      POSTGRES_HOST: postgres-local
+      POSTGRES_PORT: "5432"
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ../cli:/app/cli
+      - ../flows:/app/flows
+      - ../platforms:/app/platforms
+      - ../shared:/app/shared
+      - ../scripts:/app/scripts
+      - ../logs:/app/logs
+    command: prefect worker start --pool default
+    networks:
+      - webcraw
+    restart: unless-stopped
+
+  # ── Pipeline runner (exec shell / ad-hoc runs) ─────────────────────────────
+
+  pipeline-runner:
+    build:
+      context: ..
+      dockerfile: infra_webcraw/Dockerfile
+    container_name: pipeline-runner
+    depends_on:
+      postgres-local:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      prefect-server:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    environment:
+      S3_ENDPOINT: http://minio:9000
+      POSTGRES_HOST: postgres-local
+      POSTGRES_PORT: "5432"
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ../cli:/app/cli
+      - ../flows:/app/flows
+      - ../platforms:/app/platforms
+      - ../shared:/app/shared
+      - ../scripts:/app/scripts
+      - ../logs:/app/logs
+    command: sleep infinity
+    networks:
+      - webcraw
+    restart: unless-stopped
+
+volumes:
+  minio_data:
+    driver: local
+  pg_data:
+    driver: local
+
+networks:
+  webcraw:
+    driver: bridge

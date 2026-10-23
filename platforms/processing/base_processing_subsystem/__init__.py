@@ -16,7 +16,6 @@ Không chứa: crawl logic, MinIO/PG I/O, Polars engine.
 from __future__ import annotations
 
 import hashlib
-import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -24,6 +23,8 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
+
+from shared.logger.logger_setup import logger_manager
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -111,12 +112,12 @@ class MetadataRepository:
     def __init__(
         self,
         delta_backend: Any = None,
-        logger: Optional[logging.Logger] = None,
+        logger=None,
         in_memory: bool = True,
     ) -> None:
         self._runs:    Dict[str, _RunRecord]  = {}
         self._lineage: List[Dict[str, Any]]   = []
-        self.logger    = logger or logging.getLogger(__name__)
+        self.logger    = logger or logger_manager.get_logger(__name__)
 
     def start_run(
         self, job_name: str, layer: str, table_name: str, run_id: str

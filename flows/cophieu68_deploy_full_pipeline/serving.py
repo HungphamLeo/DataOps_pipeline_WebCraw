@@ -1,293 +1,70 @@
 """
-serving.py — Serving Phase Module
-===================================
-Đọc Silver Parquet từ MinIO → staging PostgreSQL → normalized PostgreSQL.
+serving.py — Serving Phase
+===========================
+Silver Parquet (MinIO) → staging PostgreSQL → normalized PostgreSQL.
 
-Luồng chi tiết:
-  MinIO silver/<table>/ (Parquet)
-    → PolarsEngine.read_parquet()
-    → staging.<table> (TEXT columns, raw load)
-    → [PostgreSQL SQL: dedup + NULLIF cast + type cast]
-    → normalized.<table> (typed columns, ON CONFLICT upsert)
-
-Dùng:
-  - platforms/storage/postgre/base_postgre.py  → PostgreSQLWriter
-  - platforms/processing/polars/polars_engine  → đọc Silver Parquet từ S3
-  - flows/.../schema/schema_registry           → auto-generate staging + normalized DDL
-
-Không chứa:
-  - Crawl web, Polars transforms (bronze/silver)
-  - business transforms (silver.py)
-  - CLI (run.py)
+Luồng mỗi bảng:
+  1. PolarsEngine.read_parquet() → list of dicts (all str)
+  2. TRUNCATE + bulk INSERT vào staging.<table>
+  3. SQL upsert staging → normalized.<table>
 """
 from __future__ import annotations
-
-import re
-from decimal import Decimal, InvalidOperation
-from datetime import datetime
+import polars as pl
 from typing import Any, Dict, List, Optional
 
 from platforms.factory.client_factory import build_polars_engine, build_pg_writer
+from shared.logger.logger_setup import logger_manager
+from shared.telemetry import RECORDS_PROCESSED, span
 
-from flows.common.base_executor import BaseExecutor
+from flows.common.base_config import BasePipelineConfig, BaseExecutor
 from flows.common.context import ExecutionContext
-from flows.cophieu68_deploy_full_pipeline.pipeline_config import Cophieu68PipelineConfig
-from flows.cophieu68_deploy_full_pipeline.schema import (
-    ALL_SILVER_TABLES,
-    ALL_GOLD_TABLES,
+from flows.cophieu68_deploy_full_pipeline.ingestion.dto.extract_models import (
+    norm_numeric,
+    norm_date,
 )
 
 
 class ServingProcessor:
-    """
-    Đọc Silver Parquet (MinIO) → upsert PostgreSQL normalized tables.
-
-    Mỗi method xử lý 1 bảng:
-      1. Đọc Parquet từ MinIO qua DuckDB httpfs → list of dicts
-      2. Bulk INSERT vào staging.<table> (raw TEXT)
-      3. SQL trong PG: dedup + null-check + type-cast → upsert normalized.<table>
-    """
+    """Silver Parquet (MinIO) → upsert PostgreSQL normalized tables."""
 
     STAGING    = "staging"
     NORMALIZED = "normalized"
 
+    # Cột số cần normalize trước khi load staging (per table)
+    _NUMERIC_COLS: Dict[str, List[str]] = {
+        "fact_stock_price":       ["close_price", "open_price", "high_price", "low_price",
+                                   "volume", "foreign_buy", "foreign_sell", "foreign_value"],
+        "fact_financial_metrics": ["reference_price", "open_price", "high_price", "low_price",
+                                   "volume", "book_value", "eps", "pe", "pb", "roe", "roa",
+                                   "beta", "market_cap", "listed_volume", "avg_volume_52w",
+                                   "debt", "equity", "debt_to_equity", "equity_to_assets", "cash"],
+        "fact_business_plan":     ["plan_revenue", "pass_revenue", "plan_profit", "pass_profit"],
+        "dim_company":            ["listed_volume_initial", "listed_volume",
+                                   "circulating_volume", "market_capitalization"],
+    }
+
+    # Cột ngày cần normalize về ISO YYYY-MM-DD (per table)
+    _DATE_COLS: Dict[str, List[str]] = {
+        "fact_stock_price":  ["date"],
+        "dim_company":       ["established_date", "listed_date", "effective_date"],
+        "dim_industry":      ["effective_date"],
+    }
+
     def __init__(
         self,
-        pg_writer,                 # PostgreSQLWriter từ platforms
-        polars_engine,             # PolarsEngine từ platforms (đọc/ghi Parquet S3)
+        pg_writer,
+        polars_engine,
         lakehouse_base: str = "s3://lakehouse",
         logger=None,
     ) -> None:
-        import logging
         self.pg     = pg_writer
         self.polars = polars_engine
         self.base   = lakehouse_base.rstrip("/")
-        self.logger = logger or logging.getLogger(__name__)
+        self.logger = logger or logger_manager.get_logger(__name__)
 
     # ------------------------------------------------------------------
-    # Schema management — auto-create staging + normalized tables từ registry
+    # Internal helpers
     # ------------------------------------------------------------------
-
-    def ensure_schemas(self) -> None:
-        """
-        Tạo staging + normalized PG schemas và tất cả tables từ schema_registry.
-        Idempotent (CREATE TABLE IF NOT EXISTS) — safe khi chạy nhiều lần.
-        """
-        for schema_name in (self.STAGING, self.NORMALIZED):
-            self.pg.execute(f"CREATE SCHEMA IF NOT EXISTS {schema_name}")
-            self.logger.info("[Serving] Ensured PG schema: %s", schema_name)
-
-        # Staging tables (all TEXT) — từ Silver registry
-        for tbl_name, tbl_def in ALL_SILVER_TABLES.items():
-            ddl = tbl_def.to_staging_ddl(self.STAGING)
-            self.pg.execute(ddl)
-            self._ensure_table_columns(self.STAGING, tbl_def)
-            self.logger.debug("[Serving] Ensured staging.%s", tbl_name)
-
-        # Normalized tables (typed) — từ Gold registry
-        for tbl_name, tbl_def in ALL_GOLD_TABLES.items():
-            ddl = tbl_def.to_pg_ddl(self.NORMALIZED)
-            self.pg.execute(ddl)
-            self._ensure_table_columns(self.NORMALIZED, tbl_def)
-            self.logger.debug("[Serving] Ensured normalized.%s", tbl_name)
-
-        self.pg.execute(
-            "ALTER TABLE normalized.fact_business_plan "
-            "ALTER COLUMN revenue_completion_rate TYPE NUMERIC(10,4) "
-            "USING revenue_completion_rate::NUMERIC"
-        )
-        self.pg.execute(
-            "ALTER TABLE normalized.fact_business_plan "
-            "ALTER COLUMN profit_completion_rate TYPE NUMERIC(10,4) "
-            "USING profit_completion_rate::NUMERIC"
-        )
-
-        self.logger.info(
-            "[Serving] Schema bootstrap: staging=%d tables, normalized=%d tables",
-            len(ALL_SILVER_TABLES), len(ALL_GOLD_TABLES),
-        )
-
-    def _ensure_table_columns(self, schema: str, table_def: Any) -> None:
-        """Add registry columns to existing tables without dropping data."""
-        columns = list(table_def.columns)
-        defined_names = {column.name for column in columns}
-        if "_ingested_at" not in defined_names:
-            columns.append(("_ingested_at", "TIMESTAMPTZ"))
-        if "_pipeline_run_id" not in defined_names:
-            columns.append(("_pipeline_run_id", "TEXT"))
-        if "_ingest_timestamp" not in defined_names:
-            columns.append(("_ingest_timestamp", "TEXT"))
-
-        for column in columns:
-            if isinstance(column, tuple):
-                column_name, column_type = column
-            else:
-                column_name, column_type = column.name, column.pg_type
-            self.pg.execute(
-                f'ALTER TABLE {schema}.{table_def.table_name} '
-                f'ADD COLUMN IF NOT EXISTS "{column_name}" {column_type}'
-            )
-
-    # ------------------------------------------------------------------
-    # Internal: đọc Parquet từ MinIO qua PolarsEngine
-    # ------------------------------------------------------------------
-
-    def _read_silver(self, silver_table: str) -> Optional[List[Dict[str, Any]]]:
-        """
-        Đọc silver/<table>/**/*.parquet qua PolarsEngine, trả về list of dicts (all str).
-        Dùng Silver TableDef từ schema_registry để biết expected columns.
-        """
-        import polars as pl
-
-        path = f"{self.base}/silver/{silver_table}/**/*.parquet"
-        try:
-            df = self.polars.read_parquet(path)
-            if df.is_empty():
-                return None
-            # Cast tất cả sang str để match staging TEXT schema
-            str_exprs = [pl.col(c).cast(pl.Utf8, strict=False).alias(c) for c in df.columns]
-            df = df.with_columns(str_exprs)
-            records = df.to_pandas().where(lambda x: x.notna(), None).to_dict("records")
-            records = self._normalize_numeric_records(silver_table, records)
-            return self._normalize_date_records(silver_table, records)
-        except Exception as exc:
-            self.logger.warning("[Serving] Read silver/%s failed: %s", silver_table, exc)
-            return None
-
-    def _normalize_numeric_records(
-        self,
-        silver_table: str,
-        records: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """Normalize source numeric formats before PostgreSQL casts.
-
-        Source pages may emit values such as ``17.9K`` or ``132,000,000``.
-        Staging remains TEXT, while values destined for numeric Gold columns
-        are converted to canonical decimal strings before the SQL load.
-        """
-        table_def = ALL_GOLD_TABLES.get(silver_table)
-        if table_def is None:
-            return records
-
-        numeric_columns = {
-            column.name
-            for column in table_def.columns
-            if column.pg_type.upper().startswith(("NUMERIC", "BIGINT", "INTEGER", "SMALLINT"))
-        }
-        normalized: List[Dict[str, Any]] = []
-        for record in records:
-            clean = dict(record)
-            for column in numeric_columns.intersection(clean):
-                clean[column] = self._normalize_numeric_value(
-                    clean[column], silver_table, column
-                )
-            normalized.append(clean)
-        return normalized
-
-    def _normalize_date_records(
-        self,
-        silver_table: str,
-        records: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """Convert source date formats to ISO strings before PostgreSQL loading."""
-        table_def = ALL_GOLD_TABLES.get(silver_table)
-        if table_def is None:
-            return records
-
-        date_columns = {
-            column.name
-            for column in table_def.columns
-            if column.pg_type.upper().startswith("DATE")
-        }
-        if silver_table == "fact_stock_price":
-            date_columns.add("date")
-        normalized: List[Dict[str, Any]] = []
-        for record in records:
-            clean = dict(record)
-            for column in date_columns.intersection(clean):
-                clean[column] = self._normalize_date_value(
-                    clean[column], silver_table, column
-                )
-            normalized.append(clean)
-        return normalized
-
-    def _normalize_date_value(
-        self,
-        value: Any,
-        table: str,
-        column: str,
-    ) -> Optional[str]:
-        if value is None:
-            return None
-        text = str(value).strip()
-        if text in {"", "None", "none", "NULL", "null", "-", "--", "N/A", "n/a"}:
-            return None
-
-        for date_format in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
-            try:
-                return datetime.strptime(text, date_format).date().isoformat()
-            except ValueError:
-                continue
-
-        self.logger.warning(
-            "[Serving] Invalid date skipped: table=%s column=%s value=%r",
-            table, column, value,
-        )
-        return None
-
-    def _normalize_numeric_value(
-        self,
-        value: Any,
-        table: str,
-        column: str,
-    ) -> Optional[str]:
-        if value is None:
-            return None
-        text = str(value).strip().replace("\u00a0", "")
-        if text in {"", "None", "none", "NULL", "null", "-", "--", "N/A", "n/a"}:
-            return None
-
-        text = text.replace(",", "").replace("%", "").strip()
-        if "#" in text:
-            parts = [part.strip() for part in text.split("#") if part.strip()]
-            if len(parts) == 2:
-                left = self._normalize_numeric_value(parts[0], table, column)
-                right = self._normalize_numeric_value(parts[1], table, column)
-                if left is not None and right is not None:
-                    return format((Decimal(left) + Decimal(right)) / 2, "f")
-            text = text.split("#", 1)[0].strip()
-
-        text = re.sub(r"[xX]$", "", text).strip()
-        suffix_multiplier = Decimal("1")
-        suffix_match = re.search(r"(MI|BI|K|M|B|T)$", text, re.IGNORECASE)
-        suffix = suffix_match.group(1).upper() if suffix_match else ""
-        if suffix:
-            suffix_multiplier = {
-                "K": Decimal("1000"),
-                "M": Decimal("1000000"),
-                "MI": Decimal("1000000"),
-                "B": Decimal("1000000000"),
-                "BI": Decimal("1000000000"),
-                "T": Decimal("1000000000000"),
-            }[suffix]
-            text = text[: -len(suffix)].strip()
-
-        if not re.fullmatch(r"[+-]?\d+(?:\.\d+)?", text):
-            self.logger.warning(
-                "[Serving] Non-numeric value skipped: table=%s column=%s value=%r",
-                table, column, value,
-            )
-            return None
-
-        try:
-            result = Decimal(text) * suffix_multiplier
-        except InvalidOperation:
-            self.logger.warning(
-                "[Serving] Invalid numeric value skipped: table=%s column=%s value=%r",
-                table, column, value,
-            )
-            return None
-        return format(result, "f")
 
     def _stg(self, name: str) -> str:
         return f"{self.STAGING}.{name}"
@@ -295,21 +72,42 @@ class ServingProcessor:
     def _norm(self, name: str) -> str:
         return f"{self.NORMALIZED}.{name}"
 
-    def _load_staging(
-        self,
-        table: str,
-        records: List[Dict[str, Any]],
-        run_id: str,
-        silver_table: str,
-    ) -> int:
+    def _read_silver(self, silver_table: str) -> Optional[List[Dict[str, Any]]]:
+        """Đọc silver/<table>/**/*.parquet → list of dicts (all str), normalize số + ngày."""
+
+
+        path = f"{self.base}/silver/{silver_table}/**/*.parquet"
+        try:
+            df = self.polars.read_parquet(path)
+            if df.is_empty():
+                return None
+            str_exprs = [pl.col(c).cast(pl.Utf8, strict=False).alias(c) for c in df.columns]
+            df = df.with_columns(str_exprs)
+            records = df.to_pandas().where(lambda x: x.notna(), None).to_dict("records")
+        except Exception as exc:
+            self.logger.warning("[Serving] Read silver/%s failed: %s", silver_table, exc)
+            return None
+
+        # Normalize số và ngày ngay tại đây (dùng helpers từ dto layer)
+        num_cols = set(self._NUMERIC_COLS.get(silver_table, []))
+        date_cols = set(self._DATE_COLS.get(silver_table, []))
+        if not num_cols and not date_cols:
+            return records
+
+        cleaned = []
+        for rec in records:
+            r = dict(rec)
+            for col in num_cols.intersection(r):
+                r[col] = norm_numeric(r[col])
+            for col in date_cols.intersection(r):
+                r[col] = norm_date(r[col])
+            cleaned.append(r)
+        return cleaned
+
+    def _load_staging(self, table: str, records: List[Dict[str, Any]]) -> int:
+        """TRUNCATE + bulk INSERT records vào staging.{table}."""
         self.pg.execute(f"TRUNCATE TABLE {self._stg(table)}")
-        allowed = set(ALL_SILVER_TABLES[silver_table].column_names())
-        allowed.update({"_ingested_at", "_pipeline_run_id", "_ingest_timestamp"})
-        filtered = [
-            {key: value for key, value in record.items() if key in allowed}
-            for record in records
-        ]
-        res = self.pg.bulk_insert(self._stg(table), filtered)
+        res = self.pg.bulk_insert(self._stg(table), records)
         count = res.get("inserted_count", len(records))
         self.logger.info("[Serving] Loaded %d rows → staging.%s", count, table)
         return count
@@ -319,16 +117,24 @@ class ServingProcessor:
     # ------------------------------------------------------------------
 
     def sync_fact_stock_price(self, run_id: str) -> Dict[str, Any]:
+        """
+        Sync fact_stock_price từ staging sang normalized (Partitioned Table).
+        
+        [ST07 Optimization]:
+        ON CONFLICT sử dụng Composite Key (trade_key, trade_date) đúng theo
+        ràng buộc Declarative Range Partitioning của PostgreSQL V4 migration.
+        """
         records = self._read_silver("fact_stock_price")
         if not records:
             return {"rows_in": 0, "rows_out": 0, "table": "fact_stock_price"}
-        rows_in = self._load_staging("fact_stock_price", records, run_id, "fact_stock_price")
+        rows_in = self._load_staging("fact_stock_price", records)
+        
         sql = f"""
         INSERT INTO {self._norm("fact_stock_price")}
             (trade_key, symbol, trade_date, close_price, open_price,
              high_price, low_price, volume, foreign_buy, foreign_sell,
              foreign_net_value, year, month, _ingested_at, _pipeline_run_id)
-        SELECT DISTINCT ON (trade_key)
+        SELECT DISTINCT ON (trade_key, NULLIF("date",'None')::DATE)
             trade_key,
             UPPER(symbol),
             NULLIF("date",'None')::DATE,
@@ -348,8 +154,9 @@ class ServingProcessor:
           AND "date"    IS NOT NULL AND "date"    != 'None'
           AND trade_key IS NOT NULL AND trade_key != 'None'
           AND NULLIF(close_price,'None')::NUMERIC > 0
-        ORDER BY trade_key, _ingest_timestamp DESC NULLS LAST
-        ON CONFLICT (trade_key) DO UPDATE SET
+        ORDER BY trade_key, NULLIF("date",'None')::DATE, _ingest_timestamp DESC NULLS LAST
+        -- [ST07 Partition Conflict Resolution]:
+        ON CONFLICT (trade_key, trade_date) DO UPDATE SET
             close_price=EXCLUDED.close_price, open_price=EXCLUDED.open_price,
             high_price=EXCLUDED.high_price,   low_price=EXCLUDED.low_price,
             volume=EXCLUDED.volume,           _ingested_at=EXCLUDED._ingested_at,
@@ -360,53 +167,24 @@ class ServingProcessor:
         return {"rows_in": rows_in, "rows_out": rows_out, "table": "fact_stock_price"}
 
     def sync_dim_company(self, run_id: str) -> Dict[str, Any]:
+        """
+        Sync dim_company từ staging sang normalized qua SCD Type 2 Procedure.
+        
+        [ST07 Optimization]:
+        Gọi Stored Procedure sp_merge_dim_company_scd2 để xử lý atomic merge,
+        bảo toàn lịch sử thay đổi và tối ưu round-trip DB.
+        """
         records = self._read_silver("dim_company")
         if not records:
             return {"rows_in": 0, "rows_out": 0, "table": "dim_company"}
-        rows_in = self._load_staging("dim_company", records, run_id, "dim_company")
-        sql = (
-            f"INSERT INTO {self._norm('dim_company')}"
-            r"""
-            (company_key, symbol, full_name, english_name, short_name,
-             address, phone_number, fax, website, email_address,
-             established_date, listed_date, listed_volume_initial,
-             listed_volume, circulating_volume, market_capitalization,
-             foreign_buy, foreign_ownership,
-             effective_date, end_date, is_current, _row_hash,
-             _ingested_at, _pipeline_run_id)
-        SELECT DISTINCT ON (company_key)
-            company_key, UPPER(symbol),
-            NULLIF(full_name,'None'),     NULLIF(english_name,'None'),
-            NULLIF(short_name,'None'),    NULLIF(address,'None'),
-            NULLIF(phone_number,'None'),  NULLIF(fax,'None'),
-            NULLIF(website,'None'),       NULLIF(email_address,'None'),
-            CASE WHEN established_date ~ '^\d{4}-\d{2}-\d{2}$'
-                 THEN established_date::DATE ELSE NULL END,
-            CASE WHEN listed_date ~ '^\d{4}-\d{2}-\d{2}$'
-                 THEN listed_date::DATE ELSE NULL END,
-            NULLIF(listed_volume_initial,'None')::BIGINT,
-            NULLIF(listed_volume,'None')::BIGINT,
-            NULLIF(circulating_volume,'None')::BIGINT,
-            NULLIF(market_capitalization,'None')::NUMERIC(20,2),
-            NULLIF(foreign_buy,'None'), NULLIF(foreign_ownership,'None'),
-            COALESCE(
-                CASE WHEN effective_date ~ '^\d{4}-\d{2}-\d{2}$'
-                     THEN effective_date::DATE END,
-                CURRENT_DATE),
-            NULL::DATE, TRUE,
-            NULLIF(_row_hash,'None'),
-            NOW(), %(run_id)s"""
-            + f" FROM {self._stg('dim_company')}"
-            + r"""
-        WHERE symbol IS NOT NULL AND symbol != 'None'
-          AND company_key IS NOT NULL AND company_key != 'None'
-        ORDER BY company_key, _ingest_timestamp DESC NULLS LAST
-        ON CONFLICT (company_key) DO UPDATE SET
-            full_name=EXCLUDED.full_name, market_capitalization=EXCLUDED.market_capitalization,
-            _ingested_at=EXCLUDED._ingested_at, _pipeline_run_id=EXCLUDED._pipeline_run_id
-        """
-        )
-        self.pg.execute(sql, {"run_id": run_id})
+        rows_in = self._load_staging("dim_company", records)
+        
+        # Thực thi Stored Procedure SCD2
+        call_sql = "CALL normalized.sp_merge_dim_company_scd2(%(run_id)s);"
+        res = self.pg.execute(call_sql, {"run_id": run_id})
+        if not res.get("ok"):
+            self.logger.error("[Serving] SCD2 Procedure failed: %s", res.get("error"))
+            
         rows_out = self._count_run(self._norm("dim_company"), run_id)
         return {"rows_in": rows_in, "rows_out": rows_out, "table": "dim_company"}
 
@@ -414,7 +192,7 @@ class ServingProcessor:
         records = self._read_silver("fact_financial_metrics")
         if not records:
             return {"rows_in": 0, "rows_out": 0, "table": "fact_financial_metrics"}
-        rows_in = self._load_staging("fact_financial_metrics", records, run_id, "fact_financial_metrics")
+        rows_in = self._load_staging("fact_financial_metrics", records)
         sql = f"""
         INSERT INTO {self._norm("fact_financial_metrics")}
             (financial_ratio_key, symbol, reference_price, open_price,
@@ -462,7 +240,7 @@ class ServingProcessor:
         records = self._read_silver("fact_business_plan")
         if not records:
             return {"rows_in": 0, "rows_out": 0, "table": "fact_business_plan"}
-        rows_in = self._load_staging("fact_business_plan", records, run_id, "fact_business_plan")
+        rows_in = self._load_staging("fact_business_plan", records)
         sql = f"""
         INSERT INTO {self._norm("fact_business_plan")}
             (plan_key, symbol, year, plan_revenue, pass_revenue,
@@ -504,7 +282,7 @@ class ServingProcessor:
         records = self._read_silver("dim_industry")
         if not records:
             return {"rows_in": 0, "rows_out": 0, "table": "dim_industry"}
-        rows_in = self._load_staging("dim_industry", records, run_id, "dim_industry")
+        rows_in = self._load_staging("dim_industry", records)
         sql = (
             f"INSERT INTO {self._norm('dim_industry')}"
             r"""
@@ -537,7 +315,7 @@ class ServingProcessor:
         records = self._read_silver("dim_market_type")
         if not records:
             return {"rows_in": 0, "rows_out": 0, "table": "dim_market_type"}
-        rows_in = self._load_staging("dim_market_type", records, run_id, "dim_market_type")
+        rows_in = self._load_staging("dim_market_type", records)
         sql = f"""
         INSERT INTO {self._norm("dim_market_type")}
             (market_key, market_type, market_name, update_time, _ingested_at)
@@ -584,7 +362,9 @@ class ServingProcessor:
         }
         for name, fn in syncs:
             try:
-                res = fn()
+                with span("serving.sync", table=name):
+                    res = fn()
+                RECORDS_PROCESSED.labels("serving", name).inc(res.get("rows_out", 0))
                 results["tables"][name]      = res
                 results["total_rows_in"]    += res.get("rows_in",  0)
                 results["total_rows_out"]   += res.get("rows_out", 0)
@@ -604,16 +384,9 @@ class ServingProcessor:
 # ---------------------------------------------------------------------------
 
 class ServingExecutor(BaseExecutor):
-    """
-    Chạy toàn bộ Silver→PostgreSQL sync cho pipeline cophieu68.
-    Dùng ServingProcessor + PostgreSQLWriter từ platforms.
-    """
+    """Silver → PostgreSQL sync executor."""
 
-    def __init__(
-        self,
-        context: ExecutionContext,
-        config: "Cophieu68PipelineConfig",
-    ) -> None:
+    def __init__(self, context: ExecutionContext, config: BasePipelineConfig) -> None:
         self.context = context
         self.config  = config
         self.logger  = context.logger
@@ -621,16 +394,12 @@ class ServingExecutor(BaseExecutor):
     def execute(self) -> Dict[str, Any]:
         from platforms.processing.base_processing_subsystem import ErrorLevel
 
-        self.logger.info(
-            "[ServingExecutor] Starting serving phase date=%s", self.context.target_date
-        )
+        self.logger.info("[ServingExecutor] Starting serving phase")
         result = {"phase": "serving", "tables_synced": 0, "errors": 0, "details": {}}
 
         pg = build_pg_writer(**self.config.pg_conn_params)
         if pg is None:
-            self.logger.warning(
-                "[ServingExecutor] PostgreSQL credentials not set — skipping serving phase"
-            )
+            self.logger.warning("[ServingExecutor] No PG credentials — skipping")
             return {**result, "skipped": True, "reason": "missing_pg_credentials"}
 
         polars_engine = build_polars_engine(**self.config.polars_build_params)
@@ -642,13 +411,10 @@ class ServingExecutor(BaseExecutor):
         )
 
         try:
-            # ── Bootstrap PG schemas + tables từ schema_registry (idempotent) ──
-            proc.ensure_schemas()
-
             sync_result = proc.run_all(run_id=self.context.run_id)
-            result["details"] = sync_result["tables"]
+            result["details"]      = sync_result["tables"]
             result["tables_synced"] = sync_result["total_rows_out"]
-            result["errors"] += sync_result["errors"]
+            result["errors"]       += sync_result["errors"]
         except Exception as exc:
             self.logger.error("[ServingExecutor] Error: %s", exc)
             self.context.error_log.add(ErrorLevel.ERROR, f"Serving sync failed: {exc}")
@@ -656,8 +422,6 @@ class ServingExecutor(BaseExecutor):
         finally:
             pg.close()
 
-        self.logger.info(
-            "[ServingExecutor] Done tables_synced=%d errors=%d",
-            result["tables_synced"], result["errors"],
-        )
+        self.logger.info("[ServingExecutor] Done tables_synced=%d errors=%d",
+                         result["tables_synced"], result["errors"])
         return result

@@ -1,32 +1,23 @@
 """
-flows/shared/base_config.py
+flows/common/base_config.py
 ============================
-BasePipelineConfig — quản lý tập trung toàn bộ config của một pipeline.
-
-Nguyên tắc thiết kế:
-  - SRP: class này CHỈ lo việc đọc env + load YAML. Không chứa Executor, không chứa
-    business logic.
-  - OCP: pipeline mới subclass BasePipelineConfig và override chỉ những gì khác biệt
-    (ví dụ: DEFAULT_SYMBOLS, tên YAML config, required_sections).
-  - DIP: Executor/Orchestrator nhận BasePipelineConfig qua constructor, không import
-    module-level constants trực tiếp.
-
-Vấn đề được giải quyết so với context.py cũ:
-  - context.py cũ: module-level `os.getenv()` chạy ngay lúc import → side effects,
-    khó test, khó mock.
-  - BasePipelineConfig: lazy load — env chỉ được đọc khi gọi `load()` hoặc truy cập
-    property. Safe khi import.
-  - os.environ["S3_ENDPOINT"] = ... (global mutation) đã được loại bỏ khỏi import time.
+BasePipelineConfig  — đọc .env + load YAML. Không chứa business logic.
+BaseExecutor        — abstract base cho tất cả phase executors.
+BasePipelineOrchestrator — template orchestrator, subclass override _create_executors().
 """
 from __future__ import annotations
-
 import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
 import yaml
 from dotenv import load_dotenv
+from abc import ABC, abstractmethod
+from opentelemetry import trace
+from shared.logger.logger_setup import logger_manager
+from shared.telemetry import PIPELINE_DURATION, PIPELINE_ERRORS, bind_run, span
+import json
+from datetime import date, datetime, timezone
 
 
 class BasePipelineConfig:
@@ -55,7 +46,7 @@ class BasePipelineConfig:
         env_file: Optional[str] = None,
         logger: Optional[logging.Logger] = None,
     ) -> None:
-        from shared.logger.python_main_logger import logger_manager
+        
 
         self.logger      = logger or logger_manager.get_logger(
             f"config.{self.PIPELINE_NAME}"
@@ -151,6 +142,19 @@ class BasePipelineConfig:
         }
 
     @property
+    def polars_build_params(self) -> Dict[str, Any]:
+        """Kwargs cho build_polars_engine()."""
+        return {"storage_options": self.storage_options}
+
+    @property
+    def extractor_pipeline_config(self) -> Dict[str, Any]:
+        """Config dict truyền thẳng vào ExtractCophieu68(pipeline_config=...)."""
+        return self.yaml_params 
+
+    # DEFAULT_SYMBOLS — subclass override để cung cấp mã mặc định
+    DEFAULT_SYMBOLS: List[str] = []
+
+    @property
     def pg_host(self) -> str:
         return os.getenv("POSTGRES_HOST", "localhost")
 
@@ -228,3 +232,268 @@ class BasePipelineConfig:
         os.environ.setdefault("AWS_SECRET_ACCESS_KEY", self.s3_secret)
         # DuckDB / SQLMesh cần HOST:PORT không có scheme
         os.environ["S3_ENDPOINT"] = self.s3_endpoint
+
+
+class BaseExecutor(ABC):
+    """Abstract base cho tất cả phase executors (Bronze / Silver / Serving)."""
+
+    def __init__(self, context: Any, config: Any) -> None:
+        self.context = context
+        self.config  = config
+        self.logger  = getattr(context, "logger", None) or logger_manager.get_logger(__name__)
+
+    @abstractmethod
+    def execute(self) -> Dict[str, Any]:
+        """Chạy phase, trả về dict có ít nhất {"phase": str, "errors": int}."""
+
+    def pre_execute(self) -> None:
+        """Hook trước execute(). Override nếu cần setup."""
+
+    def post_execute(self, result: Dict[str, Any]) -> None:
+        """Hook sau execute(). Override nếu cần cleanup."""
+
+    def _log_lineage(
+        self,
+        run_id: str,
+        source_layer: str,
+        source_table: str,
+        target_layer: str,
+        target_table: str,
+        operation: str,
+        rows: int,
+    ) -> None:
+        repo = getattr(self.context, "metadata_repo", None)
+        if repo is None:
+            return
+        try:
+            repo.log_lineage(
+                run_id=run_id,
+                source_layer=source_layer,
+                source_table=source_table,
+                target_layer=target_layer,
+                target_table=target_table,
+                operation=operation,
+                rows_affected=rows,
+            )
+        except Exception:
+            if self.logger:
+                self.logger.warning(
+                    "[Executor:%s] lineage log failed: %s -> %s",
+                    self.__class__.__name__, source_table, target_table,
+                )
+
+
+
+class BasePipelineOrchestrator:
+    """
+    Template orchestrator. Subclass override _create_executors() và _phase_order().
+    """
+
+    PIPELINE_NAME: str = "base"
+
+    def __init__(
+        self,
+        config: BasePipelineConfig,
+        logger: Optional[logging.Logger] = None,
+    ) -> None:
+        self.config = config
+        self.logger = logger or logger_manager.get_logger(
+            f"orchestrator.{self.PIPELINE_NAME}"
+        )
+        self._metadata_repo = self._init_metadata_repo()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def run(
+        self,
+        phase: str,
+        symbols: Optional[List[str]] = None,
+        backend: str = "polars",
+        target_date: Optional[str] = None,
+        environment: str = "prod",
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Entry point duy nhất. phase: bronze | silver | full | validate"""
+        from flows.common.context import (
+            ExecutionContext, ExecutionPhase, ProcessingBackend, make_run_id
+        )
+        from platforms.processing.base_processing_subsystem import ErrorEventLog, ErrorLevel
+
+        phase_enum  = ExecutionPhase(phase) if isinstance(phase, str) else phase
+        symbols     = symbols or self._default_symbols()
+        target_date = target_date or date.today().isoformat()
+        run_id      = make_run_id()
+        bind_run(run_id, self.PIPELINE_NAME)
+
+        context = ExecutionContext(
+            run_id=run_id,
+            phase=phase_enum,
+            symbols=symbols,
+            backend=ProcessingBackend(backend),
+            target_date=target_date,
+            environment=environment,
+            dry_run=dry_run,
+            metadata_repo=self._metadata_repo,
+            error_log=ErrorEventLog(
+                run_id=run_id,
+                job_name=f"etl_{self.PIPELINE_NAME}_{phase_enum.value}",
+            ),
+            logger=self.logger,
+        )
+
+        self.logger.info(
+            "[%s] run_id=%s phase=%s date=%s symbols=%s",
+            self.PIPELINE_NAME, run_id, phase_enum.value, target_date, symbols,
+        )
+        with span("pipeline.run", run_id=run_id, pipeline=self.PIPELINE_NAME,
+            phase=phase_enum.value, dry_run=dry_run):
+            try:
+                self._metadata_repo.start_run(
+                    job_name=f"{self.PIPELINE_NAME}_{phase_enum.value}",
+                    layer=phase_enum.value,
+                    table_name="all_tables",
+                    run_id=run_id,
+                )
+
+                if dry_run or phase_enum.value == "validate":
+                    result = self._run_validate(context)
+                else:
+                    result = self._dispatch(context)
+
+                self._metadata_repo.end_run(run_id, status="SUCCESS", rows_written=None)
+                context.status = "SUCCESS"
+
+            except Exception as exc:
+                PIPELINE_ERRORS.labels(self.PIPELINE_NAME, phase_enum.value).inc()
+                trace.get_current_span().set_status(
+                    trace.Status(trace.StatusCode.ERROR, str(exc))
+                )
+                self.logger.error("[%s] Pipeline failed: %s", self.PIPELINE_NAME, exc)
+                self._metadata_repo.end_run(run_id, status="FAILED", error_message=str(exc))
+                context.error_log.add(ErrorLevel.FATAL, f"Pipeline failed: {exc}")
+                context.status  = "FAILED"
+                result = {"run_id": run_id, "status": "FAILED", "error": str(exc)}
+
+        context.end_time = datetime.now(timezone.utc)
+        self._metadata_repo.log_run_summary(run_id)
+
+        result["run_id"]           = run_id
+        result["duration_seconds"] = context.duration_seconds()
+        result["error_events"]     = [e.to_dict() for e in context.error_log.events]
+        return result
+
+    # ------------------------------------------------------------------
+    # Hooks — subclass override
+    # ------------------------------------------------------------------
+
+    def _create_executors(
+        self,
+        context: Any,
+        config: BasePipelineConfig,
+    ) -> Dict[str, BaseExecutor]:
+        """
+        Trả về dict {phase_name: executor_instance}.
+        Subclass PHẢI override method này.
+
+        Ví dụ:
+            return {
+                "bronze":  BronzeExecutor(context, config),
+                "silver":  SilverExecutor(context, config),
+                "gold":    GoldExecutor(context, config),
+                "serving": ServingExecutor(context, config),
+            }
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} phải implement _create_executors()"
+        )
+
+    def _phase_order(self) -> List[str]:
+        """Thứ tự chạy khi phase == FULL. Subclass override nếu cần."""
+        return ["bronze", "silver", "serving"]
+
+    def _default_symbols(self) -> List[str]:
+        return []
+
+    def _validate_config(self, context: Any) -> Dict[str, Any]:
+        v = self.config.validate()
+        if not v["is_valid"]:
+            return {"status": "VALIDATION_FAILED", "errors": v["errors"]}
+        return {
+            "status":      "VALIDATION_PASSED",
+            "phase":       context.phase.value,
+            "symbols":     context.symbols,
+            "target_date": context.target_date,
+        }
+
+    # ------------------------------------------------------------------
+    # Internal — không override
+    # ------------------------------------------------------------------
+
+    def _run_validate(self, context: Any) -> Dict[str, Any]:
+        return self._validate_config(context)
+
+    def _dispatch(self, context: Any) -> Dict[str, Any]:
+        from flows.common.context import ExecutionPhase
+
+        phases = (
+            self._phase_order()
+            if context.phase == ExecutionPhase.FULL
+            else [context.phase.value]
+        )
+        executors = self._create_executors(context, self.config)
+        results: Dict[str, Any] = {
+            "status": "COMPLETED",
+            "phases_executed": [],
+            "phase_results": {},
+        }
+        for phase_name in phases:
+            executor = executors.get(phase_name)
+            if executor is None:
+                self.logger.warning("[%s] No executor for phase=%s — skipping",
+                                    self.PIPELINE_NAME, phase_name)
+                continue
+            with span(f"phase.{phase_name}", run_id=context.run_id), \
+                 PIPELINE_DURATION.labels(self.PIPELINE_NAME, phase_name).time():
+                executor.pre_execute()
+                res = executor.execute()
+                executor.post_execute(res)
+            results["phase_results"][phase_name] = res
+            results["phases_executed"].append(phase_name)
+
+        results["metrics"] = {
+            "total_errors": len(context.error_log.events),
+            "error_summary": context.error_log.summary(),
+        }
+        return results
+
+    def _init_metadata_repo(self):
+        from platforms.processing.base_processing_subsystem import MetadataRepository
+        return MetadataRepository(
+            delta_backend=None,
+            logger=self.logger,
+            in_memory=True,
+        )
+
+
+def format_pipeline_result(result: Dict[str, Any], fmt: str = "summary") -> str:
+    """Format kết quả pipeline. fmt: 'summary' | 'text' | 'json'"""
+    if fmt == "json":
+        return json.dumps(result, indent=2, default=str)
+    if fmt == "text":
+        lines = [
+            "=" * 60,
+            f"Run ID  : {result.get('run_id', 'N/A')}",
+            f"Status  : {result.get('status', 'UNKNOWN')}",
+            f"Duration: {result.get('duration_seconds', 0):.1f}s",
+        ]
+        if result.get("phases_executed"):
+            lines.append(f"Phases  : {', '.join(result['phases_executed'])}")
+        for ev in result.get("error_events", [])[:5]:
+            lines.append(f"  [{ev.get('error_level')}] {ev.get('error_message')}")
+        lines.append("=" * 60)
+        return "\n".join(lines)
+    status = result.get("status", "UNKNOWN")
+    dur    = result.get("duration_seconds", 0)
+    return f"{status} | {dur:.1f}s"

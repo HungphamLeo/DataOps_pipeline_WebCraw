@@ -1,0 +1,32 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["logs", "export_task", "dataops_webcraw_env"]
+
+[tool.ruff.lint]
+# Giai đoạn 1: chỉ bắt lỗi thật (syntax, undefined name, import sai).
+# Codebase chưa từng được lint, bật rule rộng sẽ làm CI đỏ hàng trăm lỗi.
+# Giai đoạn 2 (sau khi sạch): thêm "I" (isort), "B" (bugbear), "UP".
+select = ["E9", "F63", "F7", "F82", "F401", "F811"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+explicit_package_bases = true
+namespace_packages = true
+warn_unused_ignores = true
+# Giai đoạn 1: không strict. Bật dần từng module bằng [[tool.mypy.overrides]].
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers"
+
+[tool.coverage.run]
+source = ["platforms", "shared"]
+omit = ["*/tests/*"]
+
+[tool.coverage.report]
+# Ratchet: tăng dần theo từng sprint. Mục tiêu cuối của PLAN là 80.
+fail_under = 0
+exclude_lines = ["pragma: no cover", "if __name__ == .__main__.:"]

@@ -45,7 +45,7 @@ def build_polars_engine(
     logger           : Logger instance; nếu None tạo mới.
     """
     from platforms.processing.polars.polars_engine import PolarsConfig, PolarsEngine
-    from shared.logger.python_main_logger import logger_manager
+    from shared.logger.logger_setup import logger_manager
 
     cfg = PolarsConfig(
         storage_options=storage_options,
@@ -63,21 +63,30 @@ def build_polars_engine(
 # ---------------------------------------------------------------------------
 
 def build_pg_writer(
-    host: str,
-    port: int,
-    database: str,
-    username: str,
-    password: str,
-    pool_min: int = 1,
-    pool_max: int = 5,
+    host:             str,
+    port:             int,
+    database:         str,
+    username:         str,
+    password:         str,
+    pool_min:         int = 1,
+    pool_max:         int = 5,
+    metrics_interval: int = 60,
     logger: Optional[logging.Logger] = None,
 ):
     """
-    Khởi tạo PostgreSQLWriter với connection pool.
+    Khởi tạo PostgreSQLWriter với connection pool + stale detection + metrics.
     Trả về None nếu username rỗng (credentials chưa được set).
+
+    Parameters
+    ----------
+    pool_min         : Connection pool minimum size.
+    pool_max         : Connection pool maximum size.
+                       Công thức: (CPU cores × 2) + effective_spindle_count.
+                       Cho pipeline đơn luồng local: 5 là đủ.
+    metrics_interval : Giây giữa các lần log pool stats. 0 = tắt.
     """
     from platforms.storage.postgre.base_postgre import PostgreSQLWriter
-    from shared.logger.python_main_logger import logger_manager
+    from shared.logger.logger_setup import logger_manager
 
     if not username:
         return None
@@ -90,9 +99,9 @@ def build_pg_writer(
         password=password,
         pool_min=pool_min,
         pool_max=pool_max,
+        metrics_interval=metrics_interval,
         logger=logger or logger_manager.get_logger("pg_writer"),
     )
-
 
 # ---------------------------------------------------------------------------
 # MinioStorageBackend — upload/download bytes, read/write Parquet
@@ -116,7 +125,7 @@ def build_minio_backend(
     secure     : True để dùng TLS (False cho local dev).
     """
     from platforms.storage.minio.minio_storage import MinioStorageBackend
-    from shared.logger.python_main_logger import logger_manager
+    from shared.logger.logger_setup import logger_manager
 
     return MinioStorageBackend(
         endpoint=endpoint,

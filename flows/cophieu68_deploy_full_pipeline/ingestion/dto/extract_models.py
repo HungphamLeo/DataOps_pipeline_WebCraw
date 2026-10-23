@@ -1,6 +1,85 @@
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional
-from dataclasses import asdict
+"""
+ingestion/dto/extract_models.py
+================================
+Data models + value normalizers cho ingestion layer.
+
+Normalizers (_norm_numeric, _norm_date) được dùng ngay tại nguồn để đảm bảo
+giá trị đã sạch trước khi đưa vào DQ / Parquet / PostgreSQL.
+"""
+import re
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
+from typing import Optional
+
+_NULL_SENTINELS = {"", "None", "none", "NULL", "null", "-", "--", "N/A", "n/a"}
+
+_SUFFIX_MAP = {
+    "K": Decimal("1e3"),
+    "M": Decimal("1e6"),
+    "MI": Decimal("1e6"),
+    "B": Decimal("1e9"),
+    "BI": Decimal("1e9"),
+    "T": Decimal("1e12"),
+}
+
+_DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d")
+
+
+def norm_numeric(value) -> Optional[str]:
+    """Chuẩn hoá giá trị số về string thập phân. Trả None nếu không parse được.
+
+    Hỗ trợ: dấu phẩy nghìn, ký hiệu đơn vị K/M/B/T/MI/BI, khoảng trắng NBSP,
+    cặp số phân cách '#' (lấy trung bình), hậu tố 'x'.
+    """
+    if value is None:
+        return None
+    text = str(value).strip().replace("\u00a0", "")
+    if text in _NULL_SENTINELS:
+        return None
+    text = text.replace(",", "").replace("%", "").strip()
+
+    # Cặp "a#b" → trung bình
+    if "#" in text:
+        parts = [p.strip() for p in text.split("#") if p.strip()]
+        if len(parts) == 2:
+            a, b = norm_numeric(parts[0]), norm_numeric(parts[1])
+            if a is not None and b is not None:
+                return format((Decimal(a) + Decimal(b)) / 2, "f")
+        text = text.split("#", 1)[0].strip()
+
+    text = re.sub(r"[xX]$", "", text).strip()
+    multiplier = Decimal("1")
+    m = re.search(r"(MI|BI|K|M|B|T)$", text, re.IGNORECASE)
+    if m:
+        multiplier = _SUFFIX_MAP[m.group(1).upper()]
+        text = text[: -len(m.group(1))].strip()
+
+    if not re.fullmatch(r"[+-]?\d+(?:\.\d+)?", text):
+        return None
+    try:
+        return format(Decimal(text) * multiplier, "f")
+    except InvalidOperation:
+        return None
+
+
+def norm_date(value) -> Optional[str]:
+    """Chuẩn hoá giá trị ngày về ISO string YYYY-MM-DD. Trả None nếu không parse được."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text in _NULL_SENTINELS:
+        return None
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+
+from dataclasses import dataclass, field, asdict
+from typing import List, Dict
 import pandas as pd
 import json
 
