@@ -1,4 +1,4 @@
-# Pin bookworm cứng để tránh Docker Hub re-tag sang Trixie (Debian 13 đã drop openjdk-17).
+# Pin bookworm cứng để base image ổn định, tránh bị re-tag sang Debian mới.
 FROM python:3.11.13-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -14,7 +14,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     curl \
     git \
-    openjdk-17-jre-headless \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 

@@ -6,6 +6,9 @@ formatters:
   default:
     format: "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
     datefmt: "%Y-%m-%dT%H:%M:%S"
+  json:
+    (): shared.logger.logger_setup.JsonFormatter
+    datefmt: "%Y-%m-%dT%H:%M:%S%z"
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
 # daily rotate, keep 30 days, UTF-8
@@ -22,7 +25,7 @@ handlers:
     interval: 1
     backupCount: 30
     encoding: utf-8
-    formatter: default
+    formatter: json
     level: DEBUG
 
   bronze_file:
@@ -32,7 +35,7 @@ handlers:
     interval: 1
     backupCount: 30
     encoding: utf-8
-    formatter: default
+    formatter: json
     level: DEBUG
 
   silver_file:
@@ -42,7 +45,7 @@ handlers:
     interval: 1
     backupCount: 30
     encoding: utf-8
-    formatter: default
+    formatter: json
     level: DEBUG
 
   serving_file:
@@ -52,7 +55,7 @@ handlers:
     interval: 1
     backupCount: 30
     encoding: utf-8
-    formatter: default
+    formatter: json
     level: DEBUG
 
   etl_file:
@@ -62,8 +65,21 @@ handlers:
     interval: 1
     backupCount: 30
     encoding: utf-8
-    formatter: default
+    formatter: json
     level: DEBUG
+
+    # trong handlers:
+  contract_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    filename: logs/data_contract/data_contract.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+    formatter: json
+    level: DEBUG
+
+  
 
   platform_file:
     class: logging.handlers.TimedRotatingFileHandler
@@ -72,7 +88,7 @@ handlers:
     interval: 1
     backupCount: 30
     encoding: utf-8
-    formatter: default
+    formatter: json
     level: DEBUG
 
   prefect_file:
@@ -82,7 +98,7 @@ handlers:
     interval: 1
     backupCount: 30
     encoding: utf-8
-    formatter: default
+    formatter: json
     level: DEBUG
 
 # ── Loggers ───────────────────────────────────────────────────────────────────
@@ -197,6 +213,13 @@ loggers:
     level: DEBUG
     handlers: [console, etl_file]
     propagate: false
+
+  # trong loggers:
+  data_contract:
+    level: DEBUG
+    handlers: [console, contract_file]
+    propagate: false
+
 
 # ── Root fallback ──────────────────────────────────────────────────────────────
 root:

@@ -6,7 +6,6 @@ BaseExecutor        — abstract base cho tất cả phase executors.
 BasePipelineOrchestrator — template orchestrator, subclass override _create_executors().
 """
 from __future__ import annotations
-
 import logging
 import os
 from pathlib import Path
@@ -14,7 +13,9 @@ from typing import Any, Dict, List, Optional
 import yaml
 from dotenv import load_dotenv
 from abc import ABC, abstractmethod
+from opentelemetry import trace
 from shared.logger.logger_setup import logger_manager
+from shared.telemetry import PIPELINE_DURATION, PIPELINE_ERRORS, bind_run, span
 import json
 from datetime import date, datetime, timezone
 
@@ -324,6 +325,7 @@ class BasePipelineOrchestrator:
         symbols     = symbols or self._default_symbols()
         target_date = target_date or date.today().isoformat()
         run_id      = make_run_id()
+        bind_run(run_id, self.PIPELINE_NAME)
 
         context = ExecutionContext(
             run_id=run_id,
@@ -345,29 +347,34 @@ class BasePipelineOrchestrator:
             "[%s] run_id=%s phase=%s date=%s symbols=%s",
             self.PIPELINE_NAME, run_id, phase_enum.value, target_date, symbols,
         )
+        with span("pipeline.run", run_id=run_id, pipeline=self.PIPELINE_NAME,
+            phase=phase_enum.value, dry_run=dry_run):
+            try:
+                self._metadata_repo.start_run(
+                    job_name=f"{self.PIPELINE_NAME}_{phase_enum.value}",
+                    layer=phase_enum.value,
+                    table_name="all_tables",
+                    run_id=run_id,
+                )
 
-        try:
-            self._metadata_repo.start_run(
-                job_name=f"{self.PIPELINE_NAME}_{phase_enum.value}",
-                layer=phase_enum.value,
-                table_name="all_tables",
-                run_id=run_id,
-            )
+                if dry_run or phase_enum.value == "validate":
+                    result = self._run_validate(context)
+                else:
+                    result = self._dispatch(context)
 
-            if dry_run or phase_enum.value == "validate":
-                result = self._run_validate(context)
-            else:
-                result = self._dispatch(context)
+                self._metadata_repo.end_run(run_id, status="SUCCESS", rows_written=None)
+                context.status = "SUCCESS"
 
-            self._metadata_repo.end_run(run_id, status="SUCCESS", rows_written=None)
-            context.status = "SUCCESS"
-
-        except Exception as exc:
-            self.logger.error("[%s] Pipeline failed: %s", self.PIPELINE_NAME, exc)
-            self._metadata_repo.end_run(run_id, status="FAILED", error_message=str(exc))
-            context.error_log.add(ErrorLevel.FATAL, f"Pipeline failed: {exc}")
-            context.status  = "FAILED"
-            result = {"run_id": run_id, "status": "FAILED", "error": str(exc)}
+            except Exception as exc:
+                PIPELINE_ERRORS.labels(self.PIPELINE_NAME, phase_enum.value).inc()
+                trace.get_current_span().set_status(
+                    trace.Status(trace.StatusCode.ERROR, str(exc))
+                )
+                self.logger.error("[%s] Pipeline failed: %s", self.PIPELINE_NAME, exc)
+                self._metadata_repo.end_run(run_id, status="FAILED", error_message=str(exc))
+                context.error_log.add(ErrorLevel.FATAL, f"Pipeline failed: {exc}")
+                context.status  = "FAILED"
+                result = {"run_id": run_id, "status": "FAILED", "error": str(exc)}
 
         context.end_time = datetime.now(timezone.utc)
         self._metadata_repo.log_run_summary(run_id)
@@ -447,9 +454,11 @@ class BasePipelineOrchestrator:
                 self.logger.warning("[%s] No executor for phase=%s — skipping",
                                     self.PIPELINE_NAME, phase_name)
                 continue
-            executor.pre_execute()
-            res = executor.execute()
-            executor.post_execute(res)
+            with span(f"phase.{phase_name}", run_id=context.run_id), \
+                 PIPELINE_DURATION.labels(self.PIPELINE_NAME, phase_name).time():
+                executor.pre_execute()
+                res = executor.execute()
+                executor.post_execute(res)
             results["phase_results"][phase_name] = res
             results["phases_executed"].append(phase_name)
 

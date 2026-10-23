@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from platforms.factory.client_factory import build_polars_engine, build_pg_writer
 from shared.logger.logger_setup import logger_manager
+from shared.telemetry import RECORDS_PROCESSED, span
 
 from flows.common.base_config import BasePipelineConfig, BaseExecutor
 from flows.common.context import ExecutionContext
@@ -116,16 +117,24 @@ class ServingProcessor:
     # ------------------------------------------------------------------
 
     def sync_fact_stock_price(self, run_id: str) -> Dict[str, Any]:
+        """
+        Sync fact_stock_price từ staging sang normalized (Partitioned Table).
+        
+        [ST07 Optimization]:
+        ON CONFLICT sử dụng Composite Key (trade_key, trade_date) đúng theo
+        ràng buộc Declarative Range Partitioning của PostgreSQL V4 migration.
+        """
         records = self._read_silver("fact_stock_price")
         if not records:
             return {"rows_in": 0, "rows_out": 0, "table": "fact_stock_price"}
         rows_in = self._load_staging("fact_stock_price", records)
+        
         sql = f"""
         INSERT INTO {self._norm("fact_stock_price")}
             (trade_key, symbol, trade_date, close_price, open_price,
              high_price, low_price, volume, foreign_buy, foreign_sell,
              foreign_net_value, year, month, _ingested_at, _pipeline_run_id)
-        SELECT DISTINCT ON (trade_key)
+        SELECT DISTINCT ON (trade_key, NULLIF("date",'None')::DATE)
             trade_key,
             UPPER(symbol),
             NULLIF("date",'None')::DATE,
@@ -145,8 +154,9 @@ class ServingProcessor:
           AND "date"    IS NOT NULL AND "date"    != 'None'
           AND trade_key IS NOT NULL AND trade_key != 'None'
           AND NULLIF(close_price,'None')::NUMERIC > 0
-        ORDER BY trade_key, _ingest_timestamp DESC NULLS LAST
-        ON CONFLICT (trade_key) DO UPDATE SET
+        ORDER BY trade_key, NULLIF("date",'None')::DATE, _ingest_timestamp DESC NULLS LAST
+        -- [ST07 Partition Conflict Resolution]:
+        ON CONFLICT (trade_key, trade_date) DO UPDATE SET
             close_price=EXCLUDED.close_price, open_price=EXCLUDED.open_price,
             high_price=EXCLUDED.high_price,   low_price=EXCLUDED.low_price,
             volume=EXCLUDED.volume,           _ingested_at=EXCLUDED._ingested_at,
@@ -157,53 +167,24 @@ class ServingProcessor:
         return {"rows_in": rows_in, "rows_out": rows_out, "table": "fact_stock_price"}
 
     def sync_dim_company(self, run_id: str) -> Dict[str, Any]:
+        """
+        Sync dim_company từ staging sang normalized qua SCD Type 2 Procedure.
+        
+        [ST07 Optimization]:
+        Gọi Stored Procedure sp_merge_dim_company_scd2 để xử lý atomic merge,
+        bảo toàn lịch sử thay đổi và tối ưu round-trip DB.
+        """
         records = self._read_silver("dim_company")
         if not records:
             return {"rows_in": 0, "rows_out": 0, "table": "dim_company"}
         rows_in = self._load_staging("dim_company", records)
-        sql = (
-            f"INSERT INTO {self._norm('dim_company')}"
-            r"""
-            (company_key, symbol, full_name, english_name, short_name,
-             address, phone_number, fax, website, email_address,
-             established_date, listed_date, listed_volume_initial,
-             listed_volume, circulating_volume, market_capitalization,
-             foreign_buy, foreign_ownership,
-             effective_date, end_date, is_current, _row_hash,
-             _ingested_at, _pipeline_run_id)
-        SELECT DISTINCT ON (company_key)
-            company_key, UPPER(symbol),
-            NULLIF(full_name,'None'),     NULLIF(english_name,'None'),
-            NULLIF(short_name,'None'),    NULLIF(address,'None'),
-            NULLIF(phone_number,'None'),  NULLIF(fax,'None'),
-            NULLIF(website,'None'),       NULLIF(email_address,'None'),
-            CASE WHEN established_date ~ '^\d{4}-\d{2}-\d{2}$'
-                 THEN established_date::DATE ELSE NULL END,
-            CASE WHEN listed_date ~ '^\d{4}-\d{2}-\d{2}$'
-                 THEN listed_date::DATE ELSE NULL END,
-            NULLIF(listed_volume_initial,'None')::BIGINT,
-            NULLIF(listed_volume,'None')::BIGINT,
-            NULLIF(circulating_volume,'None')::BIGINT,
-            NULLIF(market_capitalization,'None')::NUMERIC(20,2),
-            NULLIF(foreign_buy,'None'), NULLIF(foreign_ownership,'None'),
-            COALESCE(
-                CASE WHEN effective_date ~ '^\d{4}-\d{2}-\d{2}$'
-                     THEN effective_date::DATE END,
-                CURRENT_DATE),
-            NULL::DATE, TRUE,
-            NULLIF(_row_hash,'None'),
-            NOW(), %(run_id)s"""
-            + f" FROM {self._stg('dim_company')}"
-            + r"""
-        WHERE symbol IS NOT NULL AND symbol != 'None'
-          AND company_key IS NOT NULL AND company_key != 'None'
-        ORDER BY company_key, _ingest_timestamp DESC NULLS LAST
-        ON CONFLICT (company_key) DO UPDATE SET
-            full_name=EXCLUDED.full_name, market_capitalization=EXCLUDED.market_capitalization,
-            _ingested_at=EXCLUDED._ingested_at, _pipeline_run_id=EXCLUDED._pipeline_run_id
-        """
-        )
-        self.pg.execute(sql, {"run_id": run_id})
+        
+        # Thực thi Stored Procedure SCD2
+        call_sql = "CALL normalized.sp_merge_dim_company_scd2(%(run_id)s);"
+        res = self.pg.execute(call_sql, {"run_id": run_id})
+        if not res.get("ok"):
+            self.logger.error("[Serving] SCD2 Procedure failed: %s", res.get("error"))
+            
         rows_out = self._count_run(self._norm("dim_company"), run_id)
         return {"rows_in": rows_in, "rows_out": rows_out, "table": "dim_company"}
 
@@ -381,7 +362,9 @@ class ServingProcessor:
         }
         for name, fn in syncs:
             try:
-                res = fn()
+                with span("serving.sync", table=name):
+                    res = fn()
+                RECORDS_PROCESSED.labels("serving", name).inc(res.get("rows_out", 0))
                 results["tables"][name]      = res
                 results["total_rows_in"]    += res.get("rows_in",  0)
                 results["total_rows_out"]   += res.get("rows_out", 0)

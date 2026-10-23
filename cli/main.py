@@ -112,7 +112,9 @@ def main() -> None:
     Orchestrator is responsible for resolving ExecutionPhase — CLI passes raw string.
     """
     from shared.logger.logger_setup import setup_pipeline_logging
+    from shared.telemetry import init_telemetry
     setup_pipeline_logging()
+    init_telemetry()
 
     parser = build_parser()
     args = parser.parse_args()

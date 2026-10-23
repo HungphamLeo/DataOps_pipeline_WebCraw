@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
+import polars as pl
 from shared.logger.logger_setup import logger_manager
 
 def _extract_bucket(s3_path: str) -> Optional[str]:
@@ -36,7 +36,6 @@ class PolarsEngine:
         self.logger = logger or logger_manager.get_logger(__name__)
         if config.thread_pool_size:
             try:
-                import polars as pl
                 pl.Config.set_tbl_rows(20)
             except Exception:
                 pass
@@ -187,5 +186,4 @@ class PolarsEngine:
 
     def read_parquet(self, path: str) -> Any:
         """Read Parquet from local path or S3."""
-        import polars as pl
         return pl.read_parquet(path, storage_options=self.config.storage_options or None)

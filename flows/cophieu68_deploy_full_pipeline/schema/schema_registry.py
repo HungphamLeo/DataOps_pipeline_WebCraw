@@ -30,6 +30,31 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+@dataclass
+class ColumnDef:
+    name:         str
+    polars_dtype: str  = "Utf8"
+    pg_type:      str  = "TEXT"
+    nullable:     bool = True
+    primary_key:  bool = False
+    description:  str  = ""
+
+
+@dataclass
+class TableDef:
+    layer:        str
+    table_name:   str
+    description:  str             = ""
+    partition_by: List[str]       = field(default_factory=list)
+    primary_keys: List[str]       = field(default_factory=list)
+    columns:      List[ColumnDef] = field(default_factory=list)
+
+    def to_polars_schema(self) -> Dict[str, object]:
+        """Bronze luôn all-Utf8 (raw); silver/gold dùng dtype khai báo."""
+        import polars as pl
+        if self.layer == "bronze":
+            return {c.name: pl.Utf8 for c in self.columns}
+        return {c.name: getattr(pl, c.polars_dtype) for c in self.columns}
 # ===========================================================================
 # ══════════════════════════  BRONZE TABLES  ═════════════════════════════════
 # Bronze = raw ingest từ cophieu68.vn, tất cả cột TEXT

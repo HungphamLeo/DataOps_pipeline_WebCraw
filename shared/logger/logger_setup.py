@@ -69,8 +69,12 @@ class JsonFormatter(logging.Formatter):
             value = getattr(record, field, None)
             if value is not None:
                 payload[field] = value
-        if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
+        try:  # ST05: trace_id/span_id/run_id/pipeline_name; bỏ qua nếu thiếu gói OTel
+            from shared.telemetry import current_run_context, current_trace_ids
+            for k, v in {**current_run_context(), **current_trace_ids()}.items():
+                payload.setdefault(k, v)
+        except ImportError:
+            pass
         return json.dumps(payload, ensure_ascii=False)
 
 

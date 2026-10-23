@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS staging.fact_stock_price (
     _dq_status           TEXT,
     _dq_errors           TEXT
 );
-
+CREATE INDEX idx_fact_stock_price_symbol_date_covering
+ON normalized.fact_stock_price (symbol, trade_date DESC)
+INCLUDE (close_price, open_price, high_price, low_price, volume);
 -- staging.company_profile (→ normalized.dim_company)
 CREATE TABLE IF NOT EXISTS staging.company_profile (
     company_key              TEXT,

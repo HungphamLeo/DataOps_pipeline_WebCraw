@@ -37,10 +37,16 @@ from flows.cophieu68_deploy_full_pipeline.builders import (
     build_extractor,
     build_cleansing_rules,
 )
+from flows.cophieu68_deploy_full_pipeline.data_contract.contracts import (StockPriceContract, CompanyProfileContract, 
+                                                                            FinancialRatiosContract,FinancialReportSummaryContract,BusinessPlanContract,
+                                                                IncomeStatementContract,BalanceSheetContract, IndustrySectorContract,MarketTypeContract )
+from flows.cophieu68_deploy_full_pipeline.data_contract.contract_gate import check_batch
+from shared.telemetry import RECORDS_PROCESSED, span
 from flows.cophieu68_deploy_full_pipeline.schema import (
     get_bronze_table,
     ALL_BRONZE_TABLES,
 )
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -168,7 +174,9 @@ class BronzeIngester:
         df = self._audit_cols(df, batch_id, run_id)
 
         path = f"{self.base_path}/bronze/stock_prices/"
-        self.engine.write_parquet(df=df, target_path=path, partition_by=["ingest_date"])
+        with span("write_bronze", table="stock_prices", rows=len(df)):
+            self.engine.write_parquet(df=df, target_path=path, partition_by=["ingest_date"])
+        RECORDS_PROCESSED.labels("bronze", "stock_prices").inc(len(df))
 
         reject_path = None
         if violations:
@@ -244,7 +252,9 @@ class BronzeIngester:
         partition_cols = [c for c in partition_cols if c in df.columns] or ["ingest_date"]
 
         path = f"{self.base_path}/bronze/{table_name}/"
-        self.engine.write_parquet(df=df, target_path=path, partition_by=partition_cols)
+        with span("write_bronze", table=table_name, rows=len(df)):
+            self.engine.write_parquet(df=df, target_path=path, partition_by=partition_cols)
+        RECORDS_PROCESSED.labels("bronze", table_name).inc(len(df))
         self.logger.info("[Bronze] Wrote %d rows → %s (schema=%s)", len(df), path,
                          "registry" if tbl_def else "fallback")
 
@@ -270,6 +280,14 @@ class BronzeExecutor(BaseExecutor):
         self.config  = config
         self.logger  = context.logger or logger_manager.get_logger(__name__)
 
+    def _gate(self, model, records, name, *, sym=None, bid=None) -> None:
+        """Contract gate ở chế độ warn. Siết sau bằng cách truyền mode="fail"."""
+        with span("validate_contract", contract=name, symbol=sym, rows=len(records)):
+            check_batch(
+                model, records, name=name,
+                logger=logger_manager.get_logger("data_contract"),
+                context={"symbol": sym, "batch_id": bid, "run_id": self.context.run_id},
+            )
 
     def _step_trading(self, ext, ing, sym, bid, res) -> None:
         data = ext.crawl_trading_data(symbol=sym, page=1)
@@ -283,6 +301,7 @@ class BronzeExecutor(BaseExecutor):
         sym_upper = sym.upper()
         for rec in raw_records:
             rec.setdefault("symbol", sym_upper)
+        self._gate(StockPriceContract, raw_records, "stock_prices", sym=sym_upper, bid=bid)
         r = ing.process(
             raw_records=raw_records, batch_id=bid,
             run_id=self.context.run_id, symbol=sym,
@@ -299,6 +318,7 @@ class BronzeExecutor(BaseExecutor):
         rec = raw if isinstance(raw, dict) else getattr(raw, "__dict__", None)
         if not rec:
             return
+        self._gate(CompanyProfileContract, [rec], "company_profile", sym=sym, bid=bid)
         r = ing.ingest("company_profile", [rec], bid, self.context.run_id, sym)
         res["rows_ingested"] += r["rows"]
         
@@ -310,6 +330,7 @@ class BronzeExecutor(BaseExecutor):
         rec = raw if isinstance(raw, dict) else getattr(raw, "__dict__", None)
         if not rec:
             return
+        self._gate(FinancialRatiosContract, [rec], "financial_ratios", sym=sym, bid=bid)
         r = ing.ingest("financial_ratios", [rec], bid, self.context.run_id, sym)
         res["rows_ingested"] += r["rows"]
         
@@ -332,6 +353,7 @@ class BronzeExecutor(BaseExecutor):
                 continue
         if not records:
             return
+        self._gate(FinancialReportSummaryContract, records, "financial_report_summary", sym=sym, bid=bid)
         r = ing.ingest("financial_report_summary", records, bid, self.context.run_id, sym)
         res["rows_ingested"] += r["rows"]
         
@@ -340,6 +362,11 @@ class BronzeExecutor(BaseExecutor):
         raw = ext.crawl_business_plan(symbol=sym)
         if not raw or not raw.get("data"):
             return
+        self._gate(
+            BusinessPlanContract,
+            [{**r, "symbol": sym.upper()} for r in raw["data"]],
+            "business_plan", sym=sym, bid=bid,
+        )
         r = ing.ingest("business_plan", raw["data"], bid, self.context.run_id, sym)
         res["rows_ingested"] += r["rows"]
         
@@ -359,6 +386,7 @@ class BronzeExecutor(BaseExecutor):
         except Exception:
             return
         table = f"income_statement_{report_type}"
+        self._gate(IncomeStatementContract, records, table, sym=sym, bid=bid)
         r = ing.ingest(table, records, bid, self.context.run_id, sym)
         res["rows_ingested"] += r["rows"]
         
@@ -377,6 +405,7 @@ class BronzeExecutor(BaseExecutor):
         except Exception:
             return
         table = f"balance_sheet_{report_type}"
+        self._gate(BalanceSheetContract, records, table, sym=sym, bid=bid)
         r = ing.ingest(table, records, bid, self.context.run_id, sym)
         res["rows_ingested"] += r["rows"]
         
@@ -390,6 +419,7 @@ class BronzeExecutor(BaseExecutor):
         if not rows:
             return
         records = [r if isinstance(r, dict) else r.__dict__ for r in rows]
+        self._gate(IndustrySectorContract, records, "industry_sectors", bid=bid)
         r = ing.ingest("industry_sectors", records, bid, self.context.run_id)
         res["rows_ingested"] += r["rows"]
         
@@ -398,6 +428,7 @@ class BronzeExecutor(BaseExecutor):
         if not rows:
             return
         records = [r if isinstance(r, dict) else r.__dict__ for r in rows]
+        self._gate(MarketTypeContract, records, "market_type_sectors", bid=bid)
         r = ing.ingest("market_type_sectors", records, bid, self.context.run_id)
         res["rows_ingested"] += r["rows"]
         
@@ -448,34 +479,36 @@ class BronzeExecutor(BaseExecutor):
 
         # ── Per-symbol ────────────────────────────────────────────────
         for sym in self.context.symbols:
-            bid = make_batch_id(sym)
-            self.logger.info("[BronzeExecutor] symbol=%s batch=%s", sym, bid)
-            ok = True
+            with span("bronze.symbol", symbol=sym):
+                bid = make_batch_id(sym)
+                self.logger.info("[BronzeExecutor] symbol=%s batch=%s", sym, bid)
+                ok = True
 
-            per_symbol_steps = [
-                ("trading_data",             lambda: self._step_trading(extractor, ingester, sym, bid, result)),
-                ("company_profile",          lambda: self._step_company_profile(extractor, ingester, sym, bid, result)),
-                ("financial_ratios",         lambda: self._step_financial_ratios(extractor, ingester, sym, bid, result)),
-                ("financial_report_summary", lambda: self._step_financial_report_summary(extractor, ingester, sym, bid, result)),
-                ("business_plan",            lambda: self._step_business_plan(extractor, ingester, sym, bid, result)),
-                ("income_statement_quarter", lambda: self._step_income_statement(extractor, ingester, sym, bid, result, "quarter")),
-                ("income_statement_year",    lambda: self._step_income_statement(extractor, ingester, sym, bid, result, "year")),
-                ("balance_sheet_quarter",    lambda: self._step_balance_sheet(extractor, ingester, sym, bid, result, "quarter")),
-                ("balance_sheet_year",       lambda: self._step_balance_sheet(extractor, ingester, sym, bid, result, "year")),
-            ]
-            for step_name, fn in per_symbol_steps:
-                try:
-                    fn()
-                except Exception as exc:
-                    self.logger.error("[Bronze] %s/%s failed: %s", sym, step_name, exc)
-                    self.context.error_log.add(
-                        ErrorLevel.WARNING, f"Bronze {sym}/{step_name}: {exc}"
-                    )
-                    ok = False
+                per_symbol_steps = [
+                    ("trading_data",             lambda: self._step_trading(extractor, ingester, sym, bid, result)),
+                    ("company_profile",          lambda: self._step_company_profile(extractor, ingester, sym, bid, result)),
+                    ("financial_ratios",         lambda: self._step_financial_ratios(extractor, ingester, sym, bid, result)),
+                    ("financial_report_summary", lambda: self._step_financial_report_summary(extractor, ingester, sym, bid, result)),
+                    ("business_plan",            lambda: self._step_business_plan(extractor, ingester, sym, bid, result)),
+                    ("income_statement_quarter", lambda: self._step_income_statement(extractor, ingester, sym, bid, result, "quarter")),
+                    ("income_statement_year",    lambda: self._step_income_statement(extractor, ingester, sym, bid, result, "year")),
+                    ("balance_sheet_quarter",    lambda: self._step_balance_sheet(extractor, ingester, sym, bid, result, "quarter")),
+                    ("balance_sheet_year",       lambda: self._step_balance_sheet(extractor, ingester, sym, bid, result, "year")),
+                ]
+                for step_name, fn in per_symbol_steps:
+                    try:
+                        with span("bronze.step", step=step_name, symbol=sym):
+                            fn()
+                    except Exception as exc:
+                        self.logger.error("[Bronze] %s/%s failed: %s", sym, step_name, exc)
+                        self.context.error_log.add(
+                            ErrorLevel.WARNING, f"Bronze {sym}/{step_name}: {exc}"
+                        )
+                        ok = False
 
-            result["symbols_processed"] += 1
-            if not ok:
-                result["errors"] += 1
+                result["symbols_processed"] += 1
+                if not ok:
+                    result["errors"] += 1
 
         # ── Global (run once) ─────────────────────────────────────────
         try:
